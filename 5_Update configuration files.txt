@@ -1,0 +1,33 @@
+2023-06-09T10:47:46.3327038Z ##[group]Run if [ ! -d "./" ]; then
+2023-06-09T10:47:46.3327349Z [36;1mif [ ! -d "./" ]; then[0m
+2023-06-09T10:47:46.3327744Z [36;1m  echo "::error::Directory: './' supplied to the 'target-folder' input does not exist in the Devlynnx/setup-node repository on the branch: main."[0m
+2023-06-09T10:47:46.3328104Z [36;1m  exit 1[0m
+2023-06-09T10:47:46.3328279Z [36;1mfi[0m
+2023-06-09T10:47:46.3328456Z [36;1m[0m
+2023-06-09T10:47:46.3328696Z [36;1mgit checkout -b tool-config-auto-update[0m
+2023-06-09T10:47:46.3328929Z [36;1m[0m
+2023-06-09T10:47:46.3329125Z [36;1mfilePatterns="*"[0m
+2023-06-09T10:47:46.3329575Z [36;1mmapfile -td ',' arrOfFilePatterns < <(echo -n "${filePatterns//, /,}")[0m
+2023-06-09T10:47:46.3329841Z [36;1m[0m
+2023-06-09T10:47:46.3330078Z [36;1mfor filePattern in "${arrOfFilePatterns[@]}"; do[0m
+2023-06-09T10:47:46.3330474Z [36;1m  if [ "$(find /home/runner/work/setup-node/setup-node/source/reusable-configurations -name "$filePattern")" ]; then[0m
+2023-06-09T10:47:46.3331036Z [36;1m    rsync -a --include="$filePattern" --exclude="*" /home/runner/work/setup-node/setup-node/source/reusable-configurations/ /home/runner/work/setup-node/setup-node/target/./[0m
+2023-06-09T10:47:46.3331471Z [36;1m  else[0m
+2023-06-09T10:47:46.3331946Z [36;1m    echo "::error::Files corresponding to the specified file pattern: '$filePattern' do not exist in the reference https://github.com/actions/reusable-workflows/tree/main/reusable-configurations folder."[0m
+2023-06-09T10:47:46.3332380Z [36;1m    exit 1[0m
+2023-06-09T10:47:46.3332560Z [36;1m  fi[0m
+2023-06-09T10:47:46.3332742Z [36;1mdone[0m
+2023-06-09T10:47:46.3332920Z [36;1m[0m
+2023-06-09T10:47:46.3333090Z [36;1mgit add .[0m
+2023-06-09T10:47:46.3333273Z [36;1m[0m
+2023-06-09T10:47:46.3333612Z [36;1mif [ "$(git diff --ignore-space-at-eol --staged /home/runner/work/setup-node/setup-node/target/./ | wc -l)" -gt "0" ]; then[0m
+2023-06-09T10:47:46.3334013Z [36;1m  echo "Configuration files update is successful."[0m
+2023-06-09T10:47:46.3334299Z [36;1m  echo "STATUS=true" >> $GITHUB_OUTPUT[0m
+2023-06-09T10:47:46.3334523Z [36;1melse[0m
+2023-06-09T10:47:46.3334930Z [36;1m  echo "::notice::Referenced configuration files are up to date with the files from https://github.com/actions/reusable-workflows/tree/main/reusable-configurations folder."[0m
+2023-06-09T10:47:46.3335361Z [36;1m  echo "STATUS=false" >> $GITHUB_OUTPUT[0m
+2023-06-09T10:47:46.3335576Z [36;1mfi[0m
+2023-06-09T10:47:46.3384415Z shell: /usr/bin/bash -e {0}
+2023-06-09T10:47:46.3384650Z ##[endgroup]
+2023-06-09T10:47:46.3470419Z Switched to a new branch 'tool-config-auto-update'
+2023-06-09T10:47:46.4858699Z ##[notice]Referenced configuration files are up to date with the files from https://github.com/actions/reusable-workflows/tree/main/reusable-configurations folder.

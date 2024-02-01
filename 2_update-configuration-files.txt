@@ -1,0 +1,10 @@
+2023-06-09T10:47:36.6018586Z ##[section]Starting: Prepare job update-configuration-files
+2023-06-09T10:47:36.6020523Z Evaluating workflow phase display name
+2023-06-09T10:47:36.6020606Z Evaluating inputs
+2023-06-09T10:47:36.6031413Z Evaluating strategy
+2023-06-09T10:47:36.6035913Z Creating job '__default'
+2023-06-09T10:47:36.6038607Z Evaluating timeout
+2023-06-09T10:47:36.6038649Z Evaluating cancel timeout
+2023-06-09T10:47:36.6038676Z Evaluating continue on error
+2023-06-09T10:47:36.6038701Z Evaluating target
+2023-06-09T10:47:36.6040295Z ##[section]Finishing: Prepare job update-configuration-files
