@@ -15,6 +15,9 @@ export declare global {
 	export type ExtractSome<T, K extends keyof T, R> = Omit<T, K> & { [P in K]-?: Extract<T[P], R> };
 
 	export type RequireSome<T, K extends keyof T> = Omit<T, K> & { [P in K]-?: T[P] };
+	export type RequireSomeWithProps<T, K extends keyof T, Props extends keyof T[K]> = Omit<T, K> & {
+		[P in K]-?: RequireSome<T[P], Props>;
+	};
 
 	export type AllNonNullable<T> = { [P in keyof T]-?: NonNullable<T[P]> };
 	export type SomeNonNullable<T, K extends keyof T> = Omit<T, K> & { [P in K]-?: NonNullable<T[P]> };
@@ -25,7 +28,12 @@ export declare global {
 	export type Prefix<P extends string, T extends string, S extends string = ''> = T extends `${P}${S}${infer R}`
 		? R
 		: never;
+
+	export type Replace<T, K extends keyof T, R> = Omit<T, K> & { [P in K]: R };
+
 	export type StartsWith<P extends string, T extends string, S extends string = ''> = T extends `${P}${S}${string}`
 		? T
 		: never;
+
+	export type UnwrapCustomEvent<T> = T extends CustomEvent<infer U> ? U : never;
 }

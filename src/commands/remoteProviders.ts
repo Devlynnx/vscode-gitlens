@@ -1,9 +1,11 @@
 import { Commands } from '../constants';
 import type { Container } from '../container';
 import type { GitCommit } from '../git/models/commit';
-import { GitRemote } from '../git/models/remote';
+import type { GitRemote } from '../git/models/remote';
+import { isRemote } from '../git/models/remote';
 import type { Repository } from '../git/models/repository';
-import type { RichRemoteProvider } from '../git/remotes/richRemoteProvider';
+import type { RemoteProvider } from '../git/remotes/remoteProvider';
+import { isSupportedCloudIntegrationId } from '../plus/integrations/authentication/models';
 import { showRepositoryPicker } from '../quickpicks/repositoryPicker';
 import { command } from '../system/command';
 import { first } from '../system/iterable';
@@ -21,7 +23,7 @@ export class ConnectRemoteProviderCommand extends Command {
 	static getMarkdownCommandArgs(remote: GitRemote): string;
 	static getMarkdownCommandArgs(argsOrRemote: ConnectRemoteProviderCommandArgs | GitRemote): string {
 		let args: ConnectRemoteProviderCommandArgs | GitCommit;
-		if (GitRemote.is(argsOrRemote)) {
+		if (isRemote(argsOrRemote)) {
 			args = {
 				remote: argsOrRemote.name,
 				repoPath: argsOrRemote.repoPath,
@@ -46,15 +48,15 @@ export class ConnectRemoteProviderCommand extends Command {
 	}
 
 	async execute(args?: ConnectRemoteProviderCommandArgs): Promise<any> {
-		let remote: GitRemote<RichRemoteProvider> | undefined;
+		let remote: GitRemote<RemoteProvider> | undefined;
 		let remotes: GitRemote[] | undefined;
 		let repoPath;
 		if (args?.repoPath == null) {
-			const repos = new Map<Repository, GitRemote<RichRemoteProvider>>();
+			const repos = new Map<Repository, GitRemote<RemoteProvider>>();
 
 			for (const repo of this.container.git.openRepositories) {
-				const remote = await repo.getRichRemote();
-				if (remote?.provider != null && !(await remote.provider.isConnected())) {
+				const remote = await repo.getBestRemoteWithIntegration({ includeDisconnected: true });
+				if (remote?.provider != null) {
 					repos.set(repo, remote);
 				}
 			}
@@ -70,25 +72,49 @@ export class ConnectRemoteProviderCommand extends Command {
 					'Choose which repository to connect to the remote provider',
 					[...repos.keys()],
 				);
-				if (pick?.item == null) return undefined;
+				if (pick == null) return undefined;
 
-				repoPath = pick.repoPath;
-				remote = repos.get(pick.item)!;
+				repoPath = pick.path;
+				remote = repos.get(pick)!;
 			}
 		} else if (args?.remote == null) {
 			repoPath = args.repoPath;
 
-			remote = await this.container.git.getBestRemoteWithRichProvider(repoPath, { includeDisconnected: true });
+			remote = await this.container.git.getBestRemoteWithIntegration(repoPath, { includeDisconnected: true });
 			if (remote == null) return false;
 		} else {
 			repoPath = args.repoPath;
 
 			remotes = await this.container.git.getRemotesWithProviders(repoPath);
-			remote = remotes.find(r => r.name === args.remote) as GitRemote<RichRemoteProvider> | undefined;
-			if (!remote?.hasRichIntegration()) return false;
+			remote = remotes.find(r => r.name === args.remote) as GitRemote<RemoteProvider> | undefined;
+			if (!remote?.hasIntegration()) return false;
 		}
 
-		const connected = await remote.provider.connect();
+		const integration = await this.container.integrations.getByRemote(remote);
+		if (integration == null) return false;
+
+		// Some integrations does not require managmement of Cloud Integrations (e.g. GitHub that can take a built-in VS Code session),
+		// therefore we try to connect them right away.
+		// Only if our attempt fails, we fall to manageCloudIntegrations flow.
+		let connected = await integration.connect();
+
+		if (!connected) {
+			if (isSupportedCloudIntegrationId(integration.id)) {
+				await this.container.integrations.manageCloudIntegrations(
+					{ integrationId: integration.id, skipIfConnected: true },
+					{
+						source: 'remoteProvider',
+						detail: {
+							action: 'connect',
+							integration: integration.id,
+						},
+					},
+				);
+			}
+
+			connected = await integration.connect();
+		}
+
 		if (
 			connected &&
 			!(remotes ?? (await this.container.git.getRemotesWithProviders(repoPath))).some(r => r.default)
@@ -110,7 +136,7 @@ export class DisconnectRemoteProviderCommand extends Command {
 	static getMarkdownCommandArgs(remote: GitRemote): string;
 	static getMarkdownCommandArgs(argsOrRemote: DisconnectRemoteProviderCommandArgs | GitRemote): string {
 		let args: DisconnectRemoteProviderCommandArgs | GitCommit;
-		if (GitRemote.is(argsOrRemote)) {
+		if (isRemote(argsOrRemote)) {
 			args = {
 				remote: argsOrRemote.name,
 				repoPath: argsOrRemote.repoPath,
@@ -138,13 +164,13 @@ export class DisconnectRemoteProviderCommand extends Command {
 	}
 
 	async execute(args?: DisconnectRemoteProviderCommandArgs): Promise<any> {
-		let remote: GitRemote<RichRemoteProvider> | undefined;
+		let remote: GitRemote<RemoteProvider> | undefined;
 		let repoPath;
 		if (args?.repoPath == null) {
-			const repos = new Map<Repository, GitRemote<RichRemoteProvider>>();
+			const repos = new Map<Repository, GitRemote<RemoteProvider>>();
 
 			for (const repo of this.container.git.openRepositories) {
-				const remote = await repo.getRichRemote(true);
+				const remote = await repo.getBestRemoteWithIntegration({ includeDisconnected: false });
 				if (remote != null) {
 					repos.set(repo, remote);
 				}
@@ -161,25 +187,24 @@ export class DisconnectRemoteProviderCommand extends Command {
 					'Choose which repository to disconnect from the remote provider',
 					[...repos.keys()],
 				);
-				if (pick?.item == null) return undefined;
+				if (pick == null) return undefined;
 
-				repoPath = pick.repoPath;
-				remote = repos.get(pick.item)!;
+				repoPath = pick.path;
+				remote = repos.get(pick)!;
 			}
 		} else if (args?.remote == null) {
 			repoPath = args.repoPath;
 
-			remote = await this.container.git.getBestRemoteWithRichProvider(repoPath, { includeDisconnected: false });
+			remote = await this.container.git.getBestRemoteWithIntegration(repoPath, { includeDisconnected: false });
 			if (remote == null) return undefined;
 		} else {
 			repoPath = args.repoPath;
 
-			remote = (await this.container.git.getRemotesWithProviders(repoPath)).find(r => r.name === args.remote) as
-				| GitRemote<RichRemoteProvider>
-				| undefined;
-			if (!remote?.hasRichIntegration()) return undefined;
+			remote = (await this.container.git.getRemotesWithProviders(repoPath)).find(r => r.name === args.remote);
+			if (!remote?.hasIntegration()) return undefined;
 		}
 
-		return remote.provider.disconnect();
+		const integration = await this.container.integrations.getByRemote(remote);
+		return integration?.disconnect();
 	}
 }

@@ -1,10 +1,4 @@
-import type {
-	CancellationToken,
-	ConfigurationChangeEvent,
-	Disposable,
-	TreeViewSelectionChangeEvent,
-	TreeViewVisibilityChangeEvent,
-} from 'vscode';
+import type { CancellationToken, ConfigurationChangeEvent, Disposable } from 'vscode';
 import { ProgressLocation, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import type { StashesViewConfig, ViewFilesLayout } from '../config';
 import { Commands } from '../constants';
@@ -13,15 +7,14 @@ import { GitUri } from '../git/gitUri';
 import type { GitStashReference } from '../git/models/reference';
 import { getReferenceLabel } from '../git/models/reference';
 import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { StashesNode } from './nodes/stashesNode';
-import { StashFileNode } from './nodes/stashFileNode';
-import { StashNode } from './nodes/stashNode';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
 
@@ -42,9 +35,16 @@ export class StashesRepositoryNode extends RepositoryFolderNode<StashesView, Sta
 export class StashesViewNode extends RepositoriesSubscribeableNode<StashesView, StashesRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let repositories = this.view.container.git.openRepositories;
+			if (configuration.get('views.collapseWorktreesWhenPossible')) {
+				const grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No stashes could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading stashes...'
+					: 'No stashes could be found.';
 
 				return [];
 			}
@@ -98,6 +98,10 @@ export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesVie
 		return this.config.reveal || !configuration.get('views.repositories.showStashes');
 	}
 
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
+	}
+
 	protected getRoot() {
 		return new StashesViewNode(this);
 	}
@@ -147,54 +151,14 @@ export class StashesView extends ViewBase<'stashes', StashesViewNode, StashesVie
 			!configuration.changed(e, 'defaultDateSource') &&
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
-			!configuration.changed(e, 'defaultTimeFormat')
+			!configuration.changed(e, 'defaultTimeFormat') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 		) {
 			return false;
 		}
 
 		return true;
-	}
-
-	protected override onSelectionChanged(e: TreeViewSelectionChangeEvent<ViewNode>) {
-		super.onSelectionChanged(e);
-		this.notifySelections();
-	}
-
-	protected override onVisibilityChanged(e: TreeViewVisibilityChangeEvent) {
-		super.onVisibilityChanged(e);
-		if (e.visible) {
-			this.notifySelections();
-		}
-	}
-
-	private notifySelections() {
-		const node = this.selection?.[0];
-		if (node == null) return;
-
-		if (node instanceof StashNode || node instanceof StashFileNode) {
-			this.container.events.fire(
-				'commit:selected',
-				{
-					commit: node.commit,
-					interaction: 'passive',
-					preserveFocus: true,
-					preserveVisibility: true,
-				},
-				{ source: this.id },
-			);
-		}
-
-		if (node instanceof StashFileNode) {
-			this.container.events.fire(
-				'file:selected',
-				{
-					uri: node.uri,
-					preserveFocus: true,
-					preserveVisibility: true,
-				},
-				{ source: this.id },
-			);
-		}
 	}
 
 	findStash(stash: GitStashReference, token?: CancellationToken) {

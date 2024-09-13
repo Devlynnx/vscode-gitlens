@@ -1,11 +1,10 @@
 import type { DecorationOptions, TextEditor, ThemableDecorationAttachmentRenderOptions } from 'vscode';
 import { Range } from 'vscode';
-import type { FileAnnotationType, GravatarDefaultStyle } from '../config';
+import type { GravatarDefaultStyle } from '../config';
 import { GlyphChars } from '../constants';
 import type { Container } from '../container';
 import type { CommitFormatOptions } from '../git/formatters/commitFormatter';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
-import type { GitBlame } from '../git/models/blame';
 import type { GitCommit } from '../git/models/commit';
 import { filterMap } from '../system/array';
 import { configuration } from '../system/configuration';
@@ -15,18 +14,24 @@ import { getLogScope } from '../system/logger.scope';
 import { maybeStopWatch } from '../system/stopwatch';
 import type { TokenOptions } from '../system/string';
 import { getTokensFromTemplate, getWidth } from '../system/string';
-import type { GitDocumentState } from '../trackers/gitDocumentTracker';
-import type { TrackedDocument } from '../trackers/trackedDocument';
-import type { AnnotationContext } from './annotationProvider';
+import type { TrackedGitDocument } from '../trackers/trackedDocument';
+import type { AnnotationContext, AnnotationState } from './annotationProvider';
 import { applyHeatmap, getGutterDecoration, getGutterRenderOptions } from './annotations';
 import { BlameAnnotationProviderBase } from './blameAnnotationProvider';
 import { Decorations } from './fileAnnotationController';
 
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
+
+export interface BlameFontOptions {
+	family: string;
+	size: number;
+	style: string;
+	weight: string;
+}
 
 export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
-	constructor(editor: TextEditor, trackedDocument: TrackedDocument<GitDocumentState>, container: Container) {
-		super('blame', editor, trackedDocument, container);
+	constructor(container: Container, editor: TextEditor, trackedDocument: TrackedGitDocument) {
+		super(container, 'blame', editor, trackedDocument);
 	}
 
 	override clear() {
@@ -40,15 +45,13 @@ export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
 	}
 
 	@log()
-	async onProvideAnnotation(context?: AnnotationContext, _type?: FileAnnotationType): Promise<boolean> {
+	override async onProvideAnnotation(context?: AnnotationContext, state?: AnnotationState): Promise<boolean> {
 		const scope = getLogScope();
 
-		this.annotationContext = context;
-
-		const blame = await this.getBlame();
+		const blame = await this.getBlame(state?.recompute);
 		if (blame == null) return false;
 
-		const sw = maybeStopWatch(scope);
+		using sw = maybeStopWatch(scope);
 
 		const cfg = configuration.get('blame');
 
@@ -72,10 +75,24 @@ export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
 			tokenOptions: tokenOptions,
 		};
 
+		const fontOptions: BlameFontOptions = {
+			family: configuration.get('blame.fontFamily'),
+			size: configuration.get('blame.fontSize'),
+			style: configuration.get('blame.fontStyle'),
+			weight: configuration.get('blame.fontWeight'),
+		};
+
 		const avatars = cfg.avatars;
 		const gravatarDefault = configuration.get('defaultGravatarsStyle');
 		const separateLines = cfg.separateLines;
-		const renderOptions = getGutterRenderOptions(separateLines, cfg.heatmap, cfg.avatars, cfg.format, options);
+		const renderOptions = getGutterRenderOptions(
+			separateLines,
+			cfg.heatmap,
+			cfg.avatars,
+			cfg.format,
+			options,
+			fontOptions,
+		);
 
 		const decorationOptions = [];
 		const decorationsMap = new Map<string, DecorationOptions | undefined>();
@@ -91,6 +108,8 @@ export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
 			computedHeatmap = this.getComputedHeatmap(blame);
 		}
 
+		let emptyLine: string | undefined;
+
 		for (const l of blame.lines) {
 			// editor lines are 0-based
 			const editorLine = l.line - 1;
@@ -102,17 +121,24 @@ export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
 				gutter = { ...gutter };
 
 				if (cfg.compact && !compacted) {
+					// Since the line length is the same just generate a single new empty line
+					if (emptyLine == null) {
+						emptyLine = GlyphChars.Space.repeat(getWidth(gutter.renderOptions!.before!.contentText!));
+					}
+
 					// Since we are wiping out the contextText make sure to copy the objects
 					gutter.renderOptions = {
 						before: {
 							...gutter.renderOptions!.before,
-							contentText: GlyphChars.Space.repeat(getWidth(gutter.renderOptions!.before!.contentText!)),
+							contentText: emptyLine,
 						},
 					};
 
 					if (separateLines) {
 						gutter.renderOptions.before!.textDecoration = `none;box-sizing: border-box${
 							avatars ? ';padding: 0 0 0 18px' : ''
+						}${fontOptions.family ? `;font-family: ${fontOptions.family}` : ''}${
+							fontOptions.size ? `;font-size: ${fontOptions.size}px` : ''
 						}`;
 					}
 
@@ -176,13 +202,11 @@ export class GutterBlameAnnotationProvider extends BlameAnnotationProviderBase {
 	}
 
 	@log({ args: false })
-	async selection(selection?: AnnotationContext['selection'], blame?: GitBlame): Promise<void> {
+	override async selection(selection?: AnnotationContext['selection']): Promise<void> {
 		if (selection === false || Decorations.gutterBlameHighlight == null) return;
 
-		if (blame == null) {
-			blame = await this.blame;
-			if (!blame?.lines.length) return;
-		}
+		const blame = await this.blame;
+		if (!blame?.lines.length) return;
 
 		let sha: string | undefined = undefined;
 		if (selection?.sha != null) {

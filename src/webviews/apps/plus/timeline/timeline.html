@@ -6,22 +6,33 @@
 			@font-face {
 				font-family: 'codicon';
 				font-display: block;
-				src: url('#{webroot}/codicon.ttf?2ab61cbaefbdf4c7c5589068100bee0c') format('truetype');
+				src: url('#{webroot}/codicon.ttf?79130123c9d3674a686cf03962523e8a') format('truetype');
 			}
 			@font-face {
 				font-family: 'glicons';
 				font-display: block;
-				src: url('#{root}/dist/glicons.woff2?8e33f5a80a91b05940d687a08305c156') format('woff2');
+				src: url('#{root}/dist/glicons.woff2?6ae679c0cde70af8c802b5257e2354a4') format('woff2');
 			}
 		</style>
+		<script type="application/javascript" nonce="#{cspNonce}">
+			window.webpackResourceBasePath = '#{webroot}/';
+		</script>
 	</head>
 
-	<body class="preload" data-placement="#{placement}" data-vscode-context='{ "webview": "#{webviewId}" }'>
-		<gk-feature-gate id="subscription-gate" class="scrollable"
+	<body
+		class="preload"
+		data-placement="#{placement}"
+		data-vscode-context='{ "webview": "#{webviewId}", "webviewInstance": "#{webviewInstanceId}" }'
+	>
+		<gl-feature-gate id="subscription-gate" class="scrollable" featureWithArticleIfNeeded="Visual File History"
 			><p slot="feature">
-				Visualize the evolution of a file, including when changes were made, how large they were, and who made
-				them.
-			</p></gk-feature-gate
+				<a href="https://help.gitkraken.com/gitlens/gitlens-features/#visual-file-history-%e2%9c%a8"
+					>Visual File History</a
+				>
+				<gl-feature-badge></gl-feature-badge>
+				&mdash; visualize the evolution of a file and quickly identify when the most impactful changes were made
+				and by whom.
+			</p></gl-feature-gate
 		>
 		<div class="container">
 			<progress-indicator id="spinner" position="top" active="true"></progress-indicator>
@@ -32,7 +43,6 @@
 					<h2 data-bind="description"></h2>
 				</div>
 				<div class="toolbox">
-					<gk-feature-gate-badge id="subscription-gate-badge"></gk-feature-gate-badge>
 					<div class="select-container">
 						<label for="periods">Timeframe</label>
 						<vscode-dropdown id="periods" name="periods" position="below">
@@ -48,14 +58,15 @@
 						</vscode-dropdown>
 					</div>
 					<gl-button
+						appearance="toolbar"
 						data-placement-visible="view"
 						href="command:gitlens.views.timeline.openInTab"
-						title="Open in Editor Area"
-						aria-label="Open in Editor Area"
-						appearance="toolbar"
+						tooltip="Open in Editor"
+						aria-label="Open in Editor"
 					>
 						<code-icon icon="link-external"></code-icon>
 					</gl-button>
+					<gl-feature-badge placement="bottom"></gl-feature-badge>
 				</div>
 			</section>
 			<section id="content">

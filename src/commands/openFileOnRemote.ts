@@ -120,7 +120,7 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 		args = { range: true, ...args };
 
 		try {
-			let remotes = await this.container.git.getRemotesWithProviders(gitUri.repoPath);
+			let remotes = await this.container.git.getRemotesWithProviders(gitUri.repoPath, { sort: true });
 
 			let range: Range | undefined;
 			if (args.range) {
@@ -165,9 +165,8 @@ export class OpenFileOnRemoteCommand extends ActiveEditorCommand {
 							: `Open File on Remote From${pad(GlyphChars.Dot, 2, 2)}${gitUri.relativePath}`,
 						`Choose a branch or tag to ${args.clipboard ? 'copy' : 'open'} the file revision from`,
 						{
-							allowEnteringRefs: true,
+							allowRevisions: true,
 							autoPick: true,
-							// checkmarks: false,
 							filter: { branches: b => b.remote || b.upstream != null },
 							picked: args.branchOrTag,
 							sort: {

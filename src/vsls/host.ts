@@ -147,7 +147,7 @@ export class VslsHostService implements Disposable {
 		_cancellation: CancellationToken,
 	): Promise<GitCommandResponse> {
 		const fn = gitWhitelist.get(request.args[0]);
-		if (fn == null || !fn(request.args)) throw new Error(`Git ${request.args[0]} command is not allowed`);
+		if (!fn?.(request.args)) throw new Error(`Git ${request.args[0]} command is not allowed`);
 
 		const { options, args } = request;
 		const [cwd, isRootWorkspace] = this.convertGitCommandCwd(options.cwd);
@@ -196,8 +196,8 @@ export class VslsHostService implements Disposable {
 		return { data: data, count: count };
 	}
 
-	// eslint-disable-next-line @typescript-eslint/require-await
 	@log()
+	// eslint-disable-next-line @typescript-eslint/require-await
 	private async onGetRepositoriesForUriRequest(
 		request: GetRepositoriesForUriRequest,
 		_cancellation: CancellationToken,

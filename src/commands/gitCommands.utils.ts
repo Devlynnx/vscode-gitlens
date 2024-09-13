@@ -1,5 +1,6 @@
 import type { RecentUsage } from '../constants';
 import type { Container } from '../container';
+import { FocusCommand } from '../plus/focus/focus';
 import { configuration } from '../system/configuration';
 import { getContext } from '../system/context';
 import { BranchGitCommand } from './git/branch';
@@ -43,7 +44,8 @@ export function getSteps(
 	return command.executeSteps();
 }
 
-export class PickCommandStep implements QuickPickStep {
+export class PickCommandStep implements QuickPickStep<QuickCommand> {
+	readonly type = 'pick';
 	readonly buttons = [];
 	private readonly hiddenItems: QuickCommand[];
 	ignoreFocusOut = false;
@@ -56,11 +58,9 @@ export class PickCommandStep implements QuickPickStep {
 		private readonly container: Container,
 		args?: GitCommandsCommandArgs,
 	) {
-		const hasVirtualFolders = getContext<boolean>('gitlens:hasVirtualFolders', false);
+		const hasVirtualFolders = getContext('gitlens:hasVirtualFolders', false);
 		const readonly =
-			hasVirtualFolders ||
-			getContext<boolean>('gitlens:readonly', false) ||
-			getContext<boolean>('gitlens:untrusted', false);
+			hasVirtualFolders || getContext('gitlens:readonly', false) || getContext('gitlens:untrusted', false);
 
 		this.items = [
 			readonly ? undefined : new BranchGitCommand(container, args?.command === 'branch' ? args : undefined),
@@ -108,6 +108,9 @@ export class PickCommandStep implements QuickPickStep {
 		}
 
 		this.hiddenItems = [];
+		if (args?.command === 'focus') {
+			this.hiddenItems.push(new FocusCommand(container, args));
+		}
 	}
 
 	private _command: QuickCommand | undefined;

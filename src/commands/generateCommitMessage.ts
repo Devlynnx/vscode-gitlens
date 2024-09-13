@@ -39,19 +39,21 @@ export class GenerateCommitMessageCommand extends ActiveEditorCommand {
 
 		try {
 			const currentMessage = scmRepo.inputBox.value;
-			const message = await this.container.ai.generateCommitMessage(repository, {
+			const message = await (
+				await this.container.ai
+			)?.generateCommitMessage(repository, {
 				context: currentMessage,
 				progress: { location: ProgressLocation.Notification, title: 'Generating commit message...' },
 			});
 			if (message == null) return;
 
 			void executeCoreCommand('workbench.view.scm');
-			scmRepo.inputBox.value = `${currentMessage ? `${currentMessage}\n\n` : ''}${message}`;
+			scmRepo.inputBox.value = currentMessage ? `${currentMessage}\n\n${message}` : message;
 		} catch (ex) {
 			Logger.error(ex, 'GenerateCommitMessageCommand');
 
-			if (ex instanceof Error && ex.message.startsWith('No staged changes')) {
-				void window.showInformationMessage('No staged changes to generate a commit message from.');
+			if (ex instanceof Error && ex.message.startsWith('No changes')) {
+				void window.showInformationMessage('No changes to generate a commit message from.');
 				return;
 			}
 

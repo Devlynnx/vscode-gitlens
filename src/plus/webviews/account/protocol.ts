@@ -1,20 +1,24 @@
-import type { WebviewIds, WebviewViewIds } from '../../../constants';
-import type { Subscription } from '../../../subscription';
-import { IpcNotificationType } from '../../../webviews/protocol';
+import type { IpcScope, WebviewState } from '../../../webviews/protocol';
+import { IpcNotification } from '../../../webviews/protocol';
+import type { Subscription } from '../../gk/account/subscription';
 
-export interface State {
-	webviewId: WebviewIds | WebviewViewIds;
-	timestamp: number;
+export const scope: IpcScope = 'account';
 
+export interface State extends WebviewState {
 	webroot?: string;
 	subscription: Subscription;
 	avatar?: string;
+	organizationsCount?: number;
 }
+
+// NOTIFICATIONS
 
 export interface DidChangeSubscriptionParams {
 	subscription: Subscription;
 	avatar?: string;
+	organizationsCount?: number;
 }
-export const DidChangeSubscriptionNotificationType = new IpcNotificationType<DidChangeSubscriptionParams>(
+export const DidChangeSubscriptionNotification = new IpcNotification<DidChangeSubscriptionParams>(
+	scope,
 	'subscription/didChange',
 );

@@ -9,7 +9,7 @@ import { isWebviewContext } from './webview';
 
 export type CommandCallback = Parameters<typeof commands.registerCommand>[1];
 
-type CommandConstructor = new (container: Container) => Command;
+type CommandConstructor = new (container: Container, ...args: any[]) => Command;
 const registrableCommands: CommandConstructor[] = [];
 
 export function command(): ClassDecorator {
@@ -22,7 +22,17 @@ export function registerCommand(command: string, callback: CommandCallback, this
 	return commands.registerCommand(
 		command,
 		function (this: any, ...args) {
-			Container.instance.telemetry.sendEvent('command', { command: command });
+			let context: any;
+			if (command === Commands.GitCommands) {
+				const arg = args?.[0];
+				if (arg?.command != null) {
+					context = { mode: args[0].command };
+					if (arg?.state?.subcommand != null) {
+						context.submode = arg.state.subcommand;
+					}
+				}
+			}
+			Container.instance.telemetry.sendEvent('command', { command: command, context: context });
 			callback.call(this, ...args);
 		},
 		thisArg,
@@ -93,7 +103,13 @@ export function executeCoreCommand<T extends [...unknown[]] = [], U = any>(
 	command: CoreCommands,
 	...args: T
 ): Thenable<U> {
-	if (command != 'setContext' && command !== 'vscode.executeDocumentSymbolProvider') {
+	if (
+		command != 'setContext' &&
+		command !== 'vscode.executeDocumentSymbolProvider' &&
+		command !== 'vscode.changes' &&
+		command !== 'vscode.diff' &&
+		command !== 'vscode.open'
+	) {
 		Container.instance.telemetry.sendEvent('command/core', { command: command });
 	}
 	return commands.executeCommand<U>(command, ...args);

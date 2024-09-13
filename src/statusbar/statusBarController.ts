@@ -1,5 +1,6 @@
 import type { ConfigurationChangeEvent, StatusBarItem, TextEditor, Uri } from 'vscode';
 import { CancellationTokenSource, Disposable, MarkdownString, StatusBarAlignment, window } from 'vscode';
+import { Command } from '../commands/base';
 import type { ToggleFileChangesAnnotationCommandArgs } from '../commands/toggleFileAnnotations';
 import { StatusBarCommand } from '../config';
 import { Commands, GlyphChars } from '../constants';
@@ -7,17 +8,16 @@ import type { Container } from '../container';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
 import type { PullRequest } from '../git/models/pullRequest';
 import { detailsMessage } from '../hovers/hovers';
-import type { MaybePausedResult } from '../system/cancellation';
-import { pauseOnCancelOrTimeout } from '../system/cancellation';
 import { asCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { debug } from '../system/decorators/log';
 import { once } from '../system/event';
 import { Logger } from '../system/logger';
 import { getLogScope } from '../system/logger.scope';
-import { getSettledValue } from '../system/promise';
+import type { MaybePausedResult } from '../system/promise';
+import { getSettledValue, pauseOnCancelOrTimeout } from '../system/promise';
 import { isTextEditor } from '../system/utils';
-import type { GitLineState, LinesChangeEvent } from '../trackers/gitLineTracker';
+import type { LinesChangeEvent, LineState } from '../trackers/lineTracker';
 
 export class StatusBarController implements Disposable {
 	private _cancellation: CancellationTokenSource | undefined;
@@ -154,6 +154,42 @@ export class StatusBarController implements Disposable {
 
 		if (clear) {
 			this.clearBlame();
+
+			if (e.suspended && e.editor?.document.isDirty && this._statusBarBlame != null) {
+				const statusBarItem = this._statusBarBlame;
+				const trackedDocumentPromise = this.container.documentTracker.get(e.editor.document);
+				queueMicrotask(async () => {
+					const doc = await trackedDocumentPromise;
+					if (!doc?.isBlameable) return;
+
+					statusBarItem.tooltip = new MarkdownString();
+					statusBarItem.tooltip.isTrusted = { enabledCommands: [Commands.ShowSettingsPage] };
+
+					if (doc.canDirtyIdle) {
+						statusBarItem.text = '$(watch) Blame Paused';
+						statusBarItem.tooltip.appendMarkdown(
+							`Blame will resume after a [${configuration.get(
+								'advanced.blame.delayAfterEdit',
+							)} ms delay](${Command.getMarkdownCommandArgsCore<[undefined, string]>(
+								Commands.ShowSettingsPage,
+								[undefined, 'advanced.blame.delayAfterEdit'],
+							)} 'Change the after edit delay') to limit the performance impact because there are unsaved changes`,
+						);
+					} else {
+						statusBarItem.text = '$(debug-pause) Blame Paused';
+						statusBarItem.tooltip.appendMarkdown(
+							`Blame will resume after saving because there are unsaved changes and the file is over the [${configuration.get(
+								'advanced.blame.sizeThresholdAfterEdit',
+							)} line threshold](${Command.getMarkdownCommandArgsCore<[undefined, string]>(
+								Commands.ShowSettingsPage,
+								[undefined, 'advanced.blame.sizeThresholdAfterEdit'],
+							)} 'Change the after edit line threshold') to limit the performance impact`,
+						);
+					}
+
+					statusBarItem.show();
+				});
+			}
 		} else if (this._statusBarBlame?.text.startsWith('$(git-commit)')) {
 			this._statusBarBlame.text = `$(watch)${this._statusBarBlame.text.substring(13)}`;
 		}
@@ -171,7 +207,7 @@ export class StatusBarController implements Disposable {
 			1: s => s.commit?.sha,
 		},
 	})
-	private async updateBlame(editor: TextEditor, state: GitLineState) {
+	private async updateBlame(editor: TextEditor, state: LineState) {
 		const cfg = configuration.get('statusBar');
 		if (!cfg.enabled || this._statusBarBlame == null || !isTextEditor(editor)) {
 			this._cancellation?.cancel();
@@ -305,7 +341,7 @@ export class StatusBarController implements Disposable {
 
 		const showPullRequests =
 			!commit.isUncommitted &&
-			remote?.hasRichIntegration() &&
+			remote?.hasIntegration() &&
 			cfg.pullRequests.enabled &&
 			(CommitFormatter.has(
 				cfg.format,
@@ -348,7 +384,7 @@ export class StatusBarController implements Disposable {
 			pr: Promise<PullRequest | undefined> | PullRequest | undefined,
 			timeout?: number,
 		) {
-			return detailsMessage(container, commit, commit.getGitUri(), commit.lines[0].line, {
+			return detailsMessage(container, commit, commit.getGitUri(), commit.lines[0].line - 1, {
 				autolinks: true,
 				cancellation: cancellation,
 				dateFormat: defaultDateFormat,

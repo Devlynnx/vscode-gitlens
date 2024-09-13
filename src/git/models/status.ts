@@ -11,7 +11,6 @@ import type { GitFile, GitFileStatus } from './file';
 import {
 	getGitFileFormattedDirectory,
 	getGitFileFormattedPath,
-	getGitFileStatusCodicon,
 	getGitFileStatusText,
 	GitFileChange,
 	GitFileConflictStatus,
@@ -44,7 +43,7 @@ export class GitStatus {
 		public readonly sha: string,
 		public readonly files: GitStatusFile[],
 		public readonly state: GitTrackingState,
-		public readonly upstream?: string,
+		public readonly upstream?: { name: string; missing: boolean },
 		public readonly rebasing: boolean = false,
 	) {
 		this.detached = isDetachedHead(branch);
@@ -254,11 +253,11 @@ export class GitStatus {
 		const remotes = await Container.instance.git.getRemotesWithProviders(this.repoPath);
 		if (remotes.length === 0) return undefined;
 
-		const remoteName = getRemoteNameFromBranchName(this.upstream);
+		const remoteName = getRemoteNameFromBranchName(this.upstream?.name);
 		return remotes.find(r => r.name === remoteName);
 	}
 
-	getUpstreamStatus(options: {
+	getUpstreamStatus(options?: {
 		empty?: string;
 		expand?: boolean;
 		icons?: boolean;
@@ -266,11 +265,7 @@ export class GitStatus {
 		separator?: string;
 		suffix?: string;
 	}): string {
-		return getUpstreamStatus(
-			this.upstream ? { name: this.upstream, missing: false } : undefined,
-			this.state,
-			options,
-		);
+		return getUpstreamStatus(this.upstream, this.state, options);
 	}
 }
 
@@ -312,7 +307,7 @@ export function getUpstreamStatus(
 				status += `${status.length === 0 ? '' : separator}${pluralize('commit', state.ahead, {
 					infix: icons ? '$(arrow-up) ' : undefined,
 				})} ahead`;
-				if (suffix.startsWith(` ${upstream.name.split('/')[0]}`)) {
+				if (suffix.includes(upstream.name.split('/')[0])) {
 					status += ' of';
 				}
 			}
@@ -392,7 +387,7 @@ export class GitStatusFile implements GitFile {
 
 			switch (y) {
 				case 'A':
-				case '?':
+					// case '?':
 					this.workingTreeStatus = GitFileWorkingTreeStatus.Added;
 					break;
 				case 'D':
@@ -435,10 +430,6 @@ export class GitStatusFile implements GitFile {
 		return getGitFileFormattedPath(this, options);
 	}
 
-	getOcticon() {
-		return getGitFileStatusCodicon(this.status);
-	}
-
 	getStatusText(): string {
 		return getGitFileStatusText(this.status);
 	}
@@ -447,6 +438,15 @@ export class GitStatusFile implements GitFile {
 		const now = new Date();
 
 		if (this.conflicted) {
+			const file = new GitFileChange(
+				this.repoPath,
+				this.path,
+				this.status,
+				this.originalPath,
+				'HEAD',
+				undefined,
+				false,
+			);
 			return [
 				new GitCommit(
 					container,
@@ -457,15 +457,7 @@ export class GitStatusFile implements GitFile {
 					'Uncommitted changes',
 					['HEAD'],
 					'Uncommitted changes',
-					new GitFileChange(
-						this.repoPath,
-						this.path,
-						this.status,
-						this.originalPath,
-						'HEAD',
-						undefined,
-						false,
-					),
+					{ file: file, files: [file] },
 					undefined,
 					[],
 				),
@@ -477,6 +469,15 @@ export class GitStatusFile implements GitFile {
 
 		if (this.wip) {
 			const previousSha = staged ? uncommittedStaged : 'HEAD';
+			const file = new GitFileChange(
+				this.repoPath,
+				this.path,
+				this.status,
+				this.originalPath,
+				previousSha,
+				undefined,
+				false,
+			);
 			commits.push(
 				new GitCommit(
 					container,
@@ -487,15 +488,7 @@ export class GitStatusFile implements GitFile {
 					'Uncommitted changes',
 					[previousSha],
 					'Uncommitted changes',
-					new GitFileChange(
-						this.repoPath,
-						this.path,
-						this.status,
-						this.originalPath,
-						previousSha,
-						undefined,
-						false,
-					),
+					{ file: file, files: [file] },
 					undefined,
 					[],
 				),
@@ -506,6 +499,15 @@ export class GitStatusFile implements GitFile {
 		}
 
 		if (staged) {
+			const file = new GitFileChange(
+				this.repoPath,
+				this.path,
+				this.status,
+				this.originalPath,
+				'HEAD',
+				undefined,
+				true,
+			);
 			commits.push(
 				new GitCommit(
 					container,
@@ -516,15 +518,7 @@ export class GitStatusFile implements GitFile {
 					'Uncommitted changes',
 					['HEAD'],
 					'Uncommitted changes',
-					new GitFileChange(
-						this.repoPath,
-						this.path,
-						this.status,
-						this.originalPath,
-						'HEAD',
-						undefined,
-						true,
-					),
+					{ file: file, files: [file] },
 					undefined,
 					[],
 				),

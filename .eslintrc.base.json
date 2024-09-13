@@ -5,10 +5,8 @@
 	"extends": [
 		"eslint:recommended",
 		"plugin:@typescript-eslint/strict-type-checked",
-		"plugin:@typescript-eslint/stylistic-type-checked",
 		"plugin:import/recommended",
-		"plugin:import/typescript",
-		"prettier"
+		"plugin:import/typescript"
 	],
 	"parser": "@typescript-eslint/parser",
 	"parserOptions": {
@@ -24,25 +22,17 @@
 	"root": true,
 	"rules": {
 		"anti-trojan-source/no-bidi": "error",
-		"arrow-parens": ["off"],
-		"brace-style": ["off", "stroustrup"],
-		"consistent-return": "off",
-		"curly": ["error", "multi-line", "consistent"],
-		"eol-last": "error",
-		"linebreak-style": ["error", "unix"],
-		"new-parens": "error",
-		"no-console": "off",
 		"no-constant-condition": ["warn", { "checkLoops": false }],
 		"no-constant-binary-expression": "error",
 		"no-caller": "error",
 		"no-debugger": "off",
-		"no-dupe-class-members": "off",
 		"no-else-return": "warn",
 		"no-empty": ["warn", { "allowEmptyCatch": true }],
 		"no-eval": "error",
 		"no-ex-assign": "warn",
 		"no-extend-native": "error",
 		"no-extra-bind": "error",
+		"no-extra-semi": "off",
 		"no-floating-decimal": "error",
 		"no-implicit-coercion": "error",
 		"no-implied-eval": "error",
@@ -50,7 +40,7 @@
 		"no-lone-blocks": "error",
 		"no-lonely-if": "error",
 		"no-loop-func": "error",
-		"no-multi-spaces": "error",
+		"no-mixed-spaces-and-tabs": "off",
 		"no-restricted-globals": ["error", "process"],
 		"no-restricted-imports": [
 			"error",
@@ -98,8 +88,18 @@
 						"message": "Use @env/ instead"
 					},
 					{
-						"group": ["src/**/*"],
+						"group": ["src/*"],
 						"message": "Use relative paths instead"
+					},
+					{
+						"group": ["react-dom"],
+						"importNames": ["Container"],
+						"message": "Use our Container instead"
+					},
+					{
+						"group": ["vscode"],
+						"importNames": ["CancellationError"],
+						"message": "Use our CancellationError instead"
 					}
 				]
 			}
@@ -134,14 +134,11 @@
 		],
 		"prefer-numeric-literals": "error",
 		"prefer-object-spread": "error",
-		"prefer-promise-reject-errors": ["error", { "allowEmptyReject": true }],
+		"prefer-promise-reject-errors": "off",
 		"prefer-rest-params": "error",
 		"prefer-spread": "error",
 		"prefer-template": "error",
-		"quotes": ["error", "single", { "avoidEscape": true, "allowTemplateLiterals": true }],
 		"require-atomic-updates": "off",
-		"semi": ["error", "always"],
-		"semi-style": ["error", "last"],
 		"sort-imports": [
 			"error",
 			{
@@ -153,15 +150,22 @@
 		],
 		"yoda": "error",
 		"import/consistent-type-specifier-style": ["error", "prefer-top-level"],
-		"import/extensions": ["error", "never"],
+		"import/default": "off",
+		"import/extensions": "off",
+		"import/named": "off",
+		"import/namespace": "off",
 		"import/newline-after-import": "warn",
 		"import/no-absolute-path": "error",
 		"import/no-cycle": "off",
+		"import/no-deprecated": "off",
 		"import/no-default-export": "error",
 		"import/no-duplicates": ["error", { "prefer-inline": false }],
 		"import/no-dynamic-require": "error",
+		"import/no-named-as-default": "off",
+		"import/no-named-as-default-member": "off",
 		"import/no-self-import": "error",
-		"import/no-unresolved": ["warn", { "ignore": ["vscode", "@env"] }],
+		"import/no-unused-modules": "off",
+		"import/no-unresolved": "off",
 		"import/no-useless-path-segments": "error",
 		"import/order": [
 			"warn",
@@ -212,7 +216,6 @@
 				}
 			}
 		],
-		"@typescript-eslint/class-literal-property-style": "off",
 		"@typescript-eslint/consistent-type-assertions": [
 			"error",
 			{
@@ -220,9 +223,7 @@
 				"objectLiteralTypeAssertions": "allow-as-parameter"
 			}
 		],
-		"@typescript-eslint/consistent-type-definitions": "off",
 		"@typescript-eslint/consistent-type-imports": ["error", { "disallowTypeAnnotations": false }],
-		"@typescript-eslint/dot-notation": "off",
 		"@typescript-eslint/naming-convention": [
 			"error",
 			{
@@ -273,7 +274,6 @@
 			"error",
 			{ "ignoreArrowShorthand": true, "ignoreVoidOperator": true }
 		],
-		"@typescript-eslint/no-empty-function": "off",
 		"@typescript-eslint/no-explicit-any": "off",
 		"@typescript-eslint/no-inferrable-types": ["warn", { "ignoreParameters": true, "ignoreProperties": true }],
 		"@typescript-eslint/no-invalid-void-type": "off", // Seems to error on `void` return types
@@ -285,6 +285,7 @@
 		"@typescript-eslint/no-unsafe-argument": "off",
 		"@typescript-eslint/no-unsafe-assignment": "off",
 		"@typescript-eslint/no-unsafe-call": "off",
+		"@typescript-eslint/no-unsafe-enum-comparison": "off",
 		"@typescript-eslint/no-unsafe-member-access": "off",
 		"@typescript-eslint/no-unused-expressions": ["warn", { "allowShortCircuit": true }],
 		"@typescript-eslint/no-unused-vars": [
@@ -296,13 +297,12 @@
 				"varsIgnorePattern": "^_$"
 			}
 		],
-		"@typescript-eslint/no-unsafe-enum-comparison": "off",
 		"@typescript-eslint/no-use-before-define": ["error", { "functions": false, "classes": false }],
 		"@typescript-eslint/prefer-for-of": "warn",
 		"@typescript-eslint/prefer-includes": "warn",
 		"@typescript-eslint/prefer-literal-enum-member": ["warn", { "allowBitwiseExpressions": true }],
-		"@typescript-eslint/prefer-nullish-coalescing": "off", // warn
 		"@typescript-eslint/prefer-optional-chain": "warn",
+		"@typescript-eslint/prefer-promise-reject-errors": ["error", { "allowEmptyReject": true }],
 		"@typescript-eslint/prefer-reduce-type-parameter": "warn",
 		"@typescript-eslint/restrict-template-expressions": [
 			"error",
@@ -326,7 +326,22 @@
 		{
 			"files": ["src/env/node/**/*"],
 			"rules": {
-				"no-restricted-imports": "off"
+				"no-restricted-imports": [
+					"error",
+					{
+						"patterns": [
+							{
+								"group": ["src/*"],
+								"message": "Use relative paths instead"
+							},
+							{
+								"group": ["react-dom"],
+								"importNames": ["Container"],
+								"message": "Use our Container instead"
+							}
+						]
+					}
+				]
 			}
 		}
 	]

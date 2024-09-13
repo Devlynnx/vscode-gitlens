@@ -1,14 +1,14 @@
 import type { InputBox, QuickInputButton, QuickPick, QuickPickItem } from 'vscode';
-import type { Keys } from '../constants';
+import type { Commands, Keys } from '../constants';
 import type { Container } from '../container';
+import { createQuickPickSeparator } from '../quickpicks/items/common';
 import type { DirectiveQuickPickItem } from '../quickpicks/items/directive';
 import { createDirectiveQuickPickItem, Directive, isDirective } from '../quickpicks/items/directive';
 import { configuration } from '../system/configuration';
 
-export * from './quickCommand.buttons';
-export * from './quickCommand.steps';
-
 export interface CustomStep<T = unknown> {
+	type: 'custom';
+
 	ignoreFocusOut?: boolean;
 
 	show(step: CustomStep<T>): Promise<StepResult<Directive | T>>;
@@ -17,67 +17,87 @@ export interface CustomStep<T = unknown> {
 export function isCustomStep(
 	step: QuickPickStep | QuickInputStep | CustomStep | typeof StepResultBreak,
 ): step is CustomStep {
-	return typeof step === 'object' && (step as CustomStep).show != null;
+	return typeof step === 'object' && 'type' in step && step.type === 'custom';
 }
 
-export interface QuickInputStep {
+export interface QuickInputStep<T extends string = string> {
+	type: 'input';
+
 	additionalButtons?: QuickInputButton[];
 	buttons?: QuickInputButton[];
+	disallowBack?: boolean;
 	ignoreFocusOut?: boolean;
+	isConfirmationStep?: boolean;
 	keys?: StepNavigationKeys[];
 	placeholder?: string;
 	prompt?: string;
 	title?: string;
-	value?: string;
+	value?: T;
 
 	onDidClickButton?(input: InputBox, button: QuickInputButton): boolean | void | Promise<boolean | void>;
 	onDidPressKey?(quickpick: InputBox, key: Keys): void | Promise<void>;
-	validate?(value: string | undefined): [boolean, string | undefined] | Promise<[boolean, string | undefined]>;
+	validate?(value: T | undefined): [boolean, T | undefined] | Promise<[boolean, T | undefined]>;
 }
 
 export function isQuickInputStep(
-	step: QuickPickStep | QuickInputStep | typeof StepResultBreak,
+	step: QuickPickStep | QuickInputStep | CustomStep | typeof StepResultBreak,
 ): step is QuickInputStep {
-	return typeof step === 'object' && (step as QuickPickStep).items == null && (step as CustomStep).show == null;
+	return typeof step === 'object' && 'type' in step && step.type === 'input';
 }
 
 export interface QuickPickStep<T extends QuickPickItem = QuickPickItem> {
+	type: 'pick';
+
 	additionalButtons?: QuickInputButton[];
 	allowEmpty?: boolean;
 	buttons?: QuickInputButton[];
+	disallowBack?: boolean;
 	ignoreFocusOut?: boolean;
-	items: (DirectiveQuickPickItem | T)[]; // | DirectiveQuickPickItem[];
+	isConfirmationStep?: boolean;
+	items: (DirectiveQuickPickItem | T)[] | Promise<(DirectiveQuickPickItem | T)[]>;
 	keys?: StepNavigationKeys[];
 	matchOnDescription?: boolean;
 	matchOnDetail?: boolean;
 	multiselect?: boolean;
-	placeholder?: string;
+	placeholder?: string | ((count: number) => string);
 	selectedItems?: QuickPickItem[];
 	title?: string;
 	value?: string;
 	selectValueWhenShown?: boolean;
 
-	onDidAccept?(quickpick: QuickPick<T>): boolean | Promise<boolean>;
-	onDidChangeValue?(quickpick: QuickPick<T>): boolean | Promise<boolean>;
-	onDidClickButton?(quickpick: QuickPick<T>, button: QuickInputButton): boolean | void | Promise<boolean | void>;
+	frozen?: boolean;
+
+	onDidAccept?(quickpick: QuickPick<DirectiveQuickPickItem | T>): boolean | Promise<boolean>;
+	onDidChangeValue?(quickpick: QuickPick<DirectiveQuickPickItem | T>): boolean | Promise<boolean>;
+	onDidChangeSelection?(quickpick: QuickPick<DirectiveQuickPickItem | T>, selection: readonly T[]): void;
+	onDidClickButton?(
+		quickpick: QuickPick<DirectiveQuickPickItem | T>,
+		button: QuickInputButton,
+	): boolean | void | Promise<boolean | void>;
 	/**
 	 * @returns `true` if the current item should be selected
 	 */
 	onDidClickItemButton?(
-		quickpick: QuickPick<T>,
+		quickpick: QuickPick<DirectiveQuickPickItem | T>,
 		button: QuickInputButton,
 		item: T,
 	): boolean | void | Promise<boolean | void>;
-	onDidLoadMore?(quickpick: QuickPick<T>): (DirectiveQuickPickItem | T)[] | Promise<(DirectiveQuickPickItem | T)[]>;
-	onDidPressKey?(quickpick: QuickPick<T>, key: Keys): void | Promise<void>;
-	onValidateValue?(quickpick: QuickPick<T>, value: string, items: T[]): boolean | Promise<boolean>;
+	onDidLoadMore?(
+		quickpick: QuickPick<DirectiveQuickPickItem | T>,
+	): (DirectiveQuickPickItem | T)[] | Promise<(DirectiveQuickPickItem | T)[]>;
+	onDidPressKey?(quickpick: QuickPick<DirectiveQuickPickItem | T>, key: Keys, item: T): void | Promise<void>;
+	onValidateValue?(
+		quickpick: QuickPick<DirectiveQuickPickItem | T>,
+		value: string,
+		items: T[],
+	): boolean | Promise<boolean>;
 	validate?(selection: T[]): boolean;
 }
 
 export function isQuickPickStep(
 	step: QuickPickStep | QuickInputStep | CustomStep | typeof StepResultBreak,
 ): step is QuickPickStep {
-	return typeof step === 'object' && (step as QuickPickStep).items != null;
+	return typeof step === 'object' && 'type' in step && step.type === 'pick';
 }
 
 export type StepGenerator =
@@ -87,10 +107,10 @@ export type StepGenerator =
 export type StepItemType<T> = T extends CustomStep<infer U>
 	? U
 	: T extends QuickPickStep<infer U>
-	? U[]
-	: T extends QuickInputStep
-	? string
-	: never;
+	  ? U[]
+	  : T extends QuickInputStep
+	    ? string
+	    : never;
 export type StepNavigationKeys = Exclude<Keys, 'left' | 'alt+left' | 'ctrl+left'>;
 export const StepResultBreak = Symbol('BreakStep');
 export type StepResult<T> = typeof StepResultBreak | T;
@@ -109,12 +129,12 @@ export type AsyncStepResultGenerator<T> = AsyncGenerator<
 // 	| Generator<QuickPickStep | QuickInputStep, StepResult<T>, any | undefined>
 // 	| AsyncGenerator<QuickPickStep | QuickInputStep, StepResult<T>, any | undefined>;
 export type StepSelection<T> = T extends CustomStep<infer U>
-	? U | Directive
+	? Exclude<U, DirectiveQuickPickItem> | Directive
 	: T extends QuickPickStep<infer U>
-	? U[] | Directive
-	: T extends QuickInputStep
-	? string | Directive
-	: never;
+	  ? Exclude<U, DirectiveQuickPickItem>[] | Directive
+	  : T extends QuickInputStep
+	    ? string | Directive
+	    : never;
 export type PartialStepState<T = unknown> = Partial<T> & { counter: number; confirm?: boolean; startingStep?: number };
 export type StepState<T = Record<string, unknown>> = T & { counter: number; confirm?: boolean; startingStep?: number };
 
@@ -132,13 +152,13 @@ export abstract class QuickCommand<State = any> implements QuickPickItem {
 		public readonly key: string,
 		public readonly label: string,
 		public readonly title: string,
-		options: {
+		options?: {
 			description?: string;
 			detail?: string;
-		} = {},
+		},
 	) {
-		this.description = options.description;
-		this.detail = options.detail;
+		this.description = options?.description;
+		this.detail = options?.detail;
 	}
 
 	get canConfirm(): boolean {
@@ -278,7 +298,7 @@ export async function canInputStepContinue<T extends QuickInputStep>(
 export function canPickStepContinue<T extends QuickPickStep>(
 	step: T,
 	state: PartialStepState,
-	selection: StepItemType<T> | Directive,
+	selection: Directive | StepItemType<T>,
 ): selection is StepItemType<T> {
 	if (!canStepContinue(step, state, selection)) return false;
 
@@ -290,12 +310,13 @@ export function canPickStepContinue<T extends QuickPickStep>(
 	return false;
 }
 
-export function canStepContinue<T extends QuickInputStep | QuickPickStep>(
-	step: T,
+export function canStepContinue<T extends QuickInputStep | QuickPickStep | CustomStep>(
+	_step: T,
 	state: PartialStepState,
 	result: Directive | StepItemType<T>,
 ): result is StepItemType<T> {
 	if (result == null) return false;
+
 	if (isDirective(result)) {
 		switch (result) {
 			case Directive.Back:
@@ -307,11 +328,6 @@ export function canStepContinue<T extends QuickInputStep | QuickPickStep>(
 			case Directive.Cancel:
 				endSteps(state);
 				break;
-			// case Directive.Noop:
-			// case Directive.RequiresVerification:
-			// case Directive.RequiresFreeSubscription:
-			// case Directive.RequiresProSubscription:
-			// 	break;
 		}
 		return false;
 	}
@@ -324,32 +340,61 @@ export function createConfirmStep<T extends QuickPickItem, Context extends { tit
 	confirmations: T[],
 	context: Context,
 	cancel?: DirectiveQuickPickItem,
-	options: Partial<QuickPickStep<T>> = {},
+	options?: Partial<QuickPickStep<T>>,
 ): QuickPickStep<T> {
 	return createPickStep<T>({
+		isConfirmationStep: true,
 		placeholder: `Confirm ${context.title}`,
 		title: title,
 		ignoreFocusOut: true,
-		items: [...confirmations, cancel ?? createDirectiveQuickPickItem(Directive.Cancel)],
+		items: [
+			...confirmations,
+			createQuickPickSeparator<T>(),
+			cancel ?? createDirectiveQuickPickItem(Directive.Cancel),
+		],
 		selectedItems: [confirmations.find(c => c.picked) ?? confirmations[0]],
 		...options,
 	});
 }
 
-export function createInputStep(step: QuickInputStep): QuickInputStep {
+export function createInputStep<T extends string>(step: Optional<QuickInputStep<T>, 'type'>): QuickInputStep<T> {
 	// Make sure any input steps won't close on focus loss
-	step.ignoreFocusOut = true;
-	return step;
+	return { type: 'input', ...step, ignoreFocusOut: true };
 }
 
-export function createPickStep<T extends QuickPickItem>(step: QuickPickStep<T>): QuickPickStep<T> {
-	return step;
+export function createPickStep<T extends QuickPickItem>(step: Optional<QuickPickStep<T>, 'type'>): QuickPickStep<T> {
+	return { type: 'pick', ...step };
 }
 
-export function createCustomStep<T>(step: CustomStep<T>): CustomStep<T> {
-	return step;
+export function createCustomStep<T>(step: Optional<CustomStep<T>, 'type'>): CustomStep<T> {
+	return { type: 'custom', ...step };
 }
 
 export function endSteps(state: PartialStepState) {
 	state.counter = -1;
+}
+
+export function freezeStep(step: QuickPickStep, quickpick: QuickPick<any>): Disposable {
+	quickpick.enabled = false;
+	step.frozen = true;
+	return {
+		[Symbol.dispose]: () => {
+			step.frozen = false;
+			quickpick.enabled = true;
+			quickpick.show();
+		},
+	};
+}
+
+export interface CrossCommandReference<T = unknown> {
+	command: Commands;
+	args?: T;
+}
+
+export function isCrossCommandReference<T = unknown>(value: any): value is CrossCommandReference<T> {
+	return value.command != null;
+}
+
+export function createCrossCommandReference<T>(command: Commands, args: T): CrossCommandReference<T> {
+	return { command: command, args: args };
 }

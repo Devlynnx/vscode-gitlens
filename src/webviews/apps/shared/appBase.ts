@@ -2,41 +2,24 @@
 import type { CustomEditorIds, WebviewIds, WebviewViewIds } from '../../../constants';
 import { debounce } from '../../../system/function';
 import { Logger } from '../../../system/logger';
+import type { LogScope } from '../../../system/logger.scope';
 import type {
-	IpcCommandType,
+	IpcCallParamsType,
+	IpcCallResponseParamsType,
+	IpcCommand,
 	IpcMessage,
-	IpcMessageParams,
-	IpcNotificationType,
+	IpcRequest,
 	WebviewFocusChangedParams,
 } from '../../protocol';
-import { onIpc, WebviewFocusChangedCommandType, WebviewReadyCommandType } from '../../protocol';
+import { DidChangeWebviewFocusNotfication, WebviewFocusChangedCommand, WebviewReadyCommand } from '../../protocol';
 import { DOM } from './dom';
 import type { Disposable } from './events';
+import type { HostIpcApi } from './ipc';
+import { getHostIpcApi, HostIpc } from './ipc';
 import type { ThemeChangeEvent } from './theme';
 import { computeThemeColors, onDidChangeTheme, watchThemeColors } from './theme';
 
 declare const DEBUG: boolean;
-
-interface VsCodeApi {
-	postMessage(msg: unknown): void;
-	setState(state: unknown): void;
-	getState(): unknown;
-}
-
-declare function acquireVsCodeApi(): VsCodeApi;
-
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
-
-let ipcSequence = 0;
-function nextIpcId() {
-	if (ipcSequence === maxSmallIntegerV8) {
-		ipcSequence = 1;
-	} else {
-		ipcSequence++;
-	}
-
-	return `webview:${ipcSequence}`;
-}
 
 export abstract class App<
 	State extends { webviewId: CustomEditorIds | WebviewIds | WebviewViewIds; timestamp: number } = {
@@ -44,7 +27,9 @@ export abstract class App<
 		timestamp: number;
 	},
 > {
-	private readonly _api: VsCodeApi;
+	private readonly _api: HostIpcApi;
+	private readonly _hostIpc: HostIpc;
+
 	protected state: State;
 	protected readonly placement: 'editor' | 'view';
 
@@ -77,10 +62,13 @@ export abstract class App<
 			DEBUG ? 'debug' : 'off',
 		);
 
-		this.log(`ctor()`);
+		this.log(`${appName}()`);
 		// this.log(`ctor(${this.state ? JSON.stringify(this.state) : ''})`);
 
-		this._api = acquireVsCodeApi();
+		this._api = getHostIpcApi();
+		this._hostIpc = new HostIpc(this.appName);
+		disposables.push(this._hostIpc);
+
 		if (this.state != null) {
 			const state = this.getState();
 			if (this.state.timestamp >= (state?.timestamp ?? 0)) {
@@ -93,17 +81,30 @@ export abstract class App<
 		disposables.push(watchThemeColors());
 
 		requestAnimationFrame(() => {
-			this.log(`ctor(): initializing...`);
+			this.log(`${appName}(): initializing...`);
 
 			try {
 				this.onInitialize?.();
 				this.bind();
 
 				if (this.onMessageReceived != null) {
-					disposables.push(DOM.on(window, 'message', this.onMessageReceived.bind(this)));
+					disposables.push(
+						this._hostIpc.onReceiveMessage(msg => {
+							switch (true) {
+								case DidChangeWebviewFocusNotfication.is(msg):
+									window.dispatchEvent(
+										new CustomEvent(msg.params.focused ? 'webview-focus' : 'webview-blur'),
+									);
+									break;
+
+								default:
+									this.onMessageReceived!(msg);
+							}
+						}),
+					);
 				}
 
-				this.sendCommand(WebviewReadyCommandType, undefined);
+				this.sendCommand(WebviewReadyCommand, undefined);
 
 				this.onInitialized?.();
 			} finally {
@@ -127,7 +128,7 @@ export abstract class App<
 	protected onInitialize?(): void;
 	protected onBind?(): Disposable[];
 	protected onInitialized?(): void;
-	protected onMessageReceived?(e: MessageEvent): void;
+	protected onMessageReceived?(msg: IpcMessage): void;
 	protected onThemeUpdated?(e: ThemeChangeEvent): void;
 
 	private _focused?: boolean;
@@ -135,6 +136,12 @@ export abstract class App<
 
 	private bindDisposables: Disposable[] | undefined;
 	protected bind() {
+		document.querySelectorAll('a').forEach(a => {
+			if (a.href === a.title) {
+				a.removeAttribute('title');
+			}
+		});
+
 		this.bindDisposables?.forEach(d => d.dispose());
 		this.bindDisposables = this.onBind?.();
 		if (this.bindDisposables == null) {
@@ -143,7 +150,7 @@ export abstract class App<
 
 		// Reduces event jankiness when only moving focus
 		const sendWebviewFocusChangedCommand = debounce((params: WebviewFocusChangedParams) => {
-			this.sendCommand(WebviewFocusChangedCommandType, params);
+			this.sendCommand(WebviewFocusChangedCommand, params);
 		}, 150);
 
 		this.bindDisposables.push(
@@ -166,74 +173,35 @@ export abstract class App<
 		);
 	}
 
-	protected log(message: string, ...optionalParams: any[]) {
-		Logger.log(message, ...optionalParams);
+	protected log(message: string, ...optionalParams: any[]): void;
+	protected log(scope: LogScope | undefined, message: string, ...optionalParams: any[]): void;
+	protected log(scopeOrMessage: LogScope | string | undefined, ...optionalParams: any[]): void {
+		if (typeof scopeOrMessage === 'string') {
+			Logger.log(scopeOrMessage, ...optionalParams);
+		} else {
+			Logger.log(scopeOrMessage, optionalParams.shift(), ...optionalParams);
+		}
 	}
 
 	protected getState(): State | undefined {
 		return this._api.getState() as State | undefined;
 	}
 
-	protected sendCommand<TCommand extends IpcCommandType<any>>(
+	protected sendCommand<TCommand extends IpcCommand<any>>(
 		command: TCommand,
-		params: IpcMessageParams<TCommand>,
+		params: IpcCallParamsType<TCommand>,
 	): void {
-		const id = nextIpcId();
-		this.log(`sendCommand(${id}): name=${command.method}`);
-
-		this.postMessage({ id: id, method: command.method, params: params });
+		this._hostIpc.sendCommand(command, params);
 	}
 
-	protected async sendCommandWithCompletion<
-		TCommand extends IpcCommandType<any>,
-		TCompletion extends IpcNotificationType<any>,
-	>(
-		command: TCommand,
-		params: IpcMessageParams<TCommand>,
-		completion: TCompletion,
-	): Promise<IpcMessageParams<TCompletion>> {
-		const id = nextIpcId();
-		this.log(`sendCommandWithCompletion(${id}): name=${command.method}`);
-
-		const promise = new Promise<IpcMessageParams<TCompletion>>((resolve, reject) => {
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-
-			const disposables = [
-				DOM.on(window, 'message', (e: MessageEvent<IpcMessage>) => {
-					onIpc(completion, e.data, params => {
-						if (e.data.completionId === id) {
-							disposables.forEach(d => d.dispose());
-							queueMicrotask(() => resolve(params));
-						}
-					});
-				}),
-				{
-					dispose: function () {
-						if (timeout != null) {
-							clearTimeout(timeout);
-							timeout = undefined;
-						}
-					},
-				},
-			];
-
-			timeout = setTimeout(() => {
-				timeout = undefined;
-				disposables.forEach(d => d.dispose());
-				debugger;
-				reject(new Error(`Timed out waiting for completion of ${completion.method}`));
-			}, 60000);
-		});
-
-		this.postMessage({ id: id, method: command.method, params: params, completionId: id });
-		return promise;
+	protected sendRequest<T extends IpcRequest<unknown, unknown>>(
+		requestType: T,
+		params: IpcCallParamsType<T>,
+	): Promise<IpcCallResponseParamsType<T>> {
+		return this._hostIpc.sendRequest(requestType, params);
 	}
 
 	protected setState(state: Partial<State>) {
 		this._api.setState(state);
-	}
-
-	private postMessage(e: IpcMessage) {
-		this._api.postMessage(e);
 	}
 }

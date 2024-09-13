@@ -27,15 +27,19 @@
 	--color-graph-selected-row: var(--vscode-list-activeSelectionBackground);
 	--color-graph-hover-row: var(--vscode-list-hoverBackground);
 	--color-graph-text-selected-row: var(--vscode-list-activeSelectionForeground);
-	--color-graph-text-dimmed-selected: var(--vscode-list-activeSelectionForeground);
-	--color-graph-text-dimmed: var(--vscode-list-activeSelectionForeground);
+	--color-graph-text-dimmed-selected: color-mix(
+		in srgb,
+		transparent 50%,
+		var(--vscode-list-activeSelectionForeground)
+	);
+	--color-graph-text-selected: var(--vscode-editor-foreground, var(--vscode-foreground));
+	--color-graph-text-dimmed: color-mix(in srgb, transparent 80%, var(--color-graph-text-selected));
 	--color-graph-actionbar-selectedBackground: var(--vscode-toolbar-hoverBackground);
 
 	--color-graph-text-hovered: var(--vscode-list-hoverForeground);
-	--color-graph-text-selected: var(--vscode-editor-foreground, var(--vscode-foreground));
-	--color-graph-text-normal: var(--color-graph-text-selected);
-	--color-graph-text-secondary: var(--color-graph-text-selected);
-	--color-graph-text-disabled: var(--color-graph-text-selected);
+	--color-graph-text-normal: color-mix(in srgb, transparent 15%, var(--color-graph-text-selected));
+	--color-graph-text-secondary: color-mix(in srgb, transparent 35%, var(--color-graph-text-selected));
+	--color-graph-text-disabled: color-mix(in srgb, transparent 50%, var(--color-graph-text-selected));
 
 	--color-graph-stats-added: var(--vscode-gitlens-graphChangesColumnAddedColor);
 	--color-graph-stats-deleted: var(--vscode-gitlens-graphChangesColumnDeletedColor);
@@ -53,6 +57,8 @@
 	--color-graph-scroll-marker-highlights: var(--vscode-gitlens-graphScrollMarkerHighlightsColor);
 	--color-graph-minimap-marker-local-branches: var(--vscode-gitlens-graphMinimapMarkerLocalBranchesColor);
 	--color-graph-scroll-marker-local-branches: var(--vscode-gitlens-graphScrollMarkerLocalBranchesColor);
+	--color-graph-minimap-marker-pull-requests: var(--vscode-gitlens-graphMinimapMarkerPullRequestsColor);
+	--color-graph-scroll-marker-pull-requests: var(--vscode-gitlens-graphScrollMarkerPullRequestsColor);
 	--color-graph-minimap-marker-remote-branches: var(--vscode-gitlens-graphMinimapMarkerRemoteBranchesColor);
 	--color-graph-scroll-marker-remote-branches: var(--vscode-gitlens-graphScrollMarkerRemoteBranchesColor);
 	--color-graph-minimap-marker-stashes: var(--vscode-gitlens-graphMinimapMarkerStashesColor);
@@ -63,6 +69,10 @@
 	--color-graph-minimap-tip-headBackground: var(--color-graph-scroll-marker-head);
 	--color-graph-minimap-tip-headBorder: var(--color-graph-scroll-marker-head);
 	--color-graph-minimap-tip-headForeground: var(--vscode-editor-foreground, var(--vscode-foreground));
+
+	--color-graph-minimap-tip-highlightBackground: var(--color-graph-scroll-marker-highlights);
+	--color-graph-minimap-tip-highlightBorder: var(--color-graph-scroll-marker-highlights);
+	--color-graph-minimap-tip-highlightForeground: var(--vscode-editor-foreground, var(--vscode-foreground));
 
 	--color-graph-minimap-tip-branchBackground: var(--color-graph-scroll-marker-local-branches);
 	--color-graph-minimap-tip-branchBorder: var(--color-graph-scroll-marker-local-branches);
@@ -78,6 +88,10 @@
 	--color-graph-minimap-tip-stashBackground: var(--color-graph-scroll-marker-stashes);
 	--color-graph-minimap-tip-stashBorder: var(--color-graph-scroll-marker-stashes);
 	--color-graph-minimap-tip-stashForeground: var(--vscode-editor-foreground, var(--vscode-foreground));
+
+	--color-graph-minimap-pullRequestBackground: var(--color-graph-scroll-marker-pull-requests);
+	--color-graph-minimap-pullRequestBorder: var(--color-graph-scroll-marker-pull-requests);
+	--color-graph-minimap-pullRequestForeground: var(--vscode-editor-foreground, var(--vscode-foreground));
 
 	--color-graph-minimap-tip-tagBackground: var(--color-graph-scroll-marker-tags);
 	--color-graph-minimap-tip-tagBorder: var(--color-graph-scroll-marker-tags);
@@ -95,6 +109,22 @@
 	--branch-status-both-foreground: var(--vscode-gitlens-decorations\.branchDivergedForegroundColor);
 
 	--graph-column-scrollbar-thickness: 14px;
+}
+
+:root:has(.vscode-dark, .vscode-high-contrast) {
+	--graph-theme-opacity-factor: '1';
+
+	--color-graph-actionbar-background: color-mix(in srgb, #fff 5%, var(--color-background));
+	--color-graph-background: color-mix(in srgb, #fff 5%, var(--color-background));
+	--color-graph-background2: color-mix(in srgb, #fff 10%, var(--color-background));
+}
+
+:root:has(.vscode-light, .vscode-high-contrast-light) {
+	--graph-theme-opacity-factor: '0.5';
+
+	--color-graph-actionbar-background: color-mix(in srgb, #000 5%, var(--color-background));
+	--color-graph-background: color-mix(in srgb, #000 5%, var(--color-background));
+	--color-graph-background2: color-mix(in srgb, #000 10%, var(--color-background));
 }
 
 body {
@@ -160,7 +190,7 @@ button:not([disabled]),
 	border-radius: 0.5rem;
 	font-size: 1rem;
 	font-weight: 500;
-	line-height: 1;
+	line-height: 1.2;
 	text-transform: uppercase;
 	color: var(--vscode-foreground);
 	background-color: var(--vscode-editorWidget-background);
@@ -199,21 +229,6 @@ button:not([disabled]),
 	}
 
 	&:not(:hover) + &-popover {
-		display: none;
-	}
-}
-
-.popover {
-	position: relative;
-
-	&__content {
-		width: max-content;
-		right: 0;
-		top: 100%;
-		white-space: normal;
-	}
-
-	&__trigger:not(:hover) + &__content {
 		display: none;
 	}
 }
@@ -414,18 +429,11 @@ button:not([disabled]),
 .columns-settings {
 	--column-button-height: 19px;
 
-	position: absolute;
-	top: 2px;
-	right: 0 !important;
-	z-index: 2;
-
 	appearance: none;
 	font-family: inherit;
 	background-color: transparent;
 	border: none;
 	color: var(--color-graph-text-disabled, hsla(0, 0%, 100%, 0.4));
-	margin: 0;
-	padding: 0 2px;
 	height: var(--column-button-height);
 	cursor: pointer;
 	background-color: var(--color-graph-actionbar-background);
@@ -620,6 +628,37 @@ button:not([disabled]),
 			// codicon-cloud
 			font-family: codicon;
 			content: '\ebaa';
+		}
+	}
+	&--remote-github,
+	&--remote-githubEnterprise {
+		&::before {
+			// codicon-github-inverted
+			font-family: codicon;
+			content: '\eba1';
+		}
+	}
+	&--remote-gitlab,
+	&--remote-gitlabSelfHosted {
+		&::before {
+			// glicon-provider-gitlab
+			font-family: 'glicons';
+			content: '\f123';
+		}
+	}
+	&--remote-bitbucket,
+	&--remote-bitbucketServer {
+		&::before {
+			// glicon-provider-bitbucket
+			font-family: 'glicons';
+			content: '\f11f';
+		}
+	}
+	&--remote-azureDevops {
+		&::before {
+			// glicon-provider-azdo
+			font-family: 'glicons';
+			content: '\f11e';
 		}
 	}
 	&--tag {
@@ -833,17 +872,8 @@ button:not([disabled]),
 		&--wrap {
 			display: grid;
 			grid-auto-flow: column;
-			white-space: nowrap;
 			justify-content: start;
-			grid-template-columns: repeat(5, min-content) minmax(min-content, 1fr);
-
-			&.no-remote-provider {
-				grid-template-columns: repeat(4, min-content) minmax(min-content, 1fr);
-			}
-
-			&.disallowed {
-				grid-template-columns: repeat(1, min-content) minmax(min-content, 1fr);
-			}
+			grid-template-columns: minmax(min-content, 1fr) min-content;
 		}
 	}
 
@@ -851,11 +881,25 @@ button:not([disabled]),
 		flex: auto 1 1;
 	}
 
+	&__row--wrap &__group {
+		white-space: nowrap;
+	}
+
 	&__debugging {
 		> * {
 			display: inline-block;
 		}
 	}
+
+	gl-feature-badge {
+		color: var(--color-foreground);
+	}
+}
+
+gl-feature-gate gl-feature-badge {
+	vertical-align: super;
+	margin-left: 0.4rem;
+	margin-right: 0.4rem;
 }
 
 .graph-app {
@@ -863,6 +907,7 @@ button:not([disabled]),
 	--fs-2: 1.3rem;
 
 	padding: 0;
+	overflow: hidden;
 
 	&__container {
 		display: flex;
@@ -887,7 +932,8 @@ button:not([disabled]),
 	}
 
 	&__gate {
-		top: 34px; /* height of the header bar */
+		// top: 34px; /* height of the header bar */
+		padding-top: 34px;
 	}
 
 	&__header {
@@ -913,9 +959,7 @@ button:not([disabled]),
 	}
 }
 
-.graph-header {
-	padding-top: 1px;
-
+.gk-graph .graph-header {
 	& .resizable-handle.horizontal {
 		--sash-size: 4px;
 		--sash-hover-size: 4px;
@@ -957,6 +1001,10 @@ button:not([disabled]),
 		}
 	}
 
+	.columns-btn {
+		margin-top: 0.1rem;
+	}
+
 	.button {
 		background-color: var(--color-graph-actionbar-background);
 		color: var(--color-graph-text-disabled, hsla(0deg, 0%, 100%, 0.4));
@@ -979,8 +1027,6 @@ button:not([disabled]),
 	}
 
 	.graph-icon {
-		position: relative;
-		top: -2px;
 		color: var(--color-graph-text-disabled, hsla(0, 0%, 100%, 0.4));
 	}
 }
@@ -1096,25 +1142,33 @@ button:not([disabled]),
 	}
 }
 
-.tooltip {
-	font-size: var(--vscode-font-size);
-	font-family: var(--vscode-font-family);
-	font-weight: normal;
-	line-height: 19px;
+.gk-graph .tooltip,
+.gk-graph.tooltip {
+	font-size: var(--vscode-font-size) !important;
+	font-family: var(--vscode-font-family) !important;
+	font-weight: normal !important;
+	line-height: 19px !important;
 
 	&.in {
 		opacity: 1;
 	}
+
+	&.tooltip-arrow:after {
+		background-color: var(--color-hover-background) !important;
+		border-right-color: var(--color-hover-border) !important;
+		border-bottom-color: var(--color-hover-border) !important;
+	}
+
 	&-inner {
-		font-size: var(--vscode-font-size);
-		padding: 4px 10px 5px 10px;
-		color: var(--color-hover-foreground);
-		background-color: var(--color-hover-background);
-		border: 1px solid var(--color-hover-border);
-		border-radius: 0;
-		box-shadow: 0 2px 8px var(--vscode-widget-shadow);
-		text-align: start;
-		white-space: break-spaces;
+		font-size: var(--vscode-font-size) !important;
+		padding: 4px 10px 5px 10px !important;
+		color: var(--color-hover-foreground) !important;
+		background-color: var(--color-hover-background) !important;
+		border: 1px solid var(--color-hover-border) !important;
+		border-radius: 0 !important;
+		box-shadow: 0 2px 8px var(--vscode-widget-shadow) !important;
+		text-align: start !important;
+		white-space: break-spaces !important;
 	}
 }
 
@@ -1130,6 +1184,10 @@ button:not([disabled]),
 		background-color: var(--color-graph-minimap-marker-local-branches);
 	}
 
+	&[data-marker='pullRequests'] {
+		background-color: var(--color-graph-minimap-marker-pull-requests);
+	}
+
 	&[data-marker='remoteBranches'] {
 		background-color: var(--color-graph-minimap-marker-remote-branches);
 	}
@@ -1141,4 +1199,16 @@ button:not([disabled]),
 	&[data-marker='tags'] {
 		background-color: var(--color-graph-minimap-marker-tags);
 	}
+}
+
+hr {
+	border: none;
+	border-top: 1px solid var(--color-foreground--25);
+}
+
+.md-code {
+	background: var(--vscode-textCodeBlock-background);
+	border-radius: 3px;
+	padding: 0px 4px 2px 4px;
+	font-family: var(--vscode-editor-font-family);
 }

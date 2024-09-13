@@ -4,7 +4,7 @@ export interface Deferrable<T extends (...args: any[]) => any> {
 	(...args: Parameters<T>): ReturnType<T> | undefined;
 	cancel(): void;
 	flush(): ReturnType<T> | undefined;
-	pending?(): boolean;
+	pending(): boolean;
 }
 
 interface PropOfValue {
@@ -12,7 +12,11 @@ interface PropOfValue {
 	value: string | undefined;
 }
 
-export function debounce<T extends (...args: any[]) => ReturnType<T>>(fn: T, wait: number): Deferrable<T> {
+export function debounce<T extends (...args: any[]) => ReturnType<T>>(
+	fn: T,
+	wait: number,
+	aggregator?: (prevArgs: Parameters<T>, nextArgs: Parameters<T>) => Parameters<T>,
+): Deferrable<T> {
 	let lastArgs: Parameters<T>;
 	let lastCallTime: number | undefined;
 	let lastThis: ThisType<T>;
@@ -53,7 +57,8 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(fn: T, wai
 
 		// Only invoke if we have `lastArgs` which means `fn` has been debounced at least once
 		if (lastArgs) return invoke();
-		lastArgs = lastThis = undefined!;
+		lastArgs = undefined!;
+		lastThis = undefined!;
 
 		return result;
 	}
@@ -62,14 +67,20 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(fn: T, wai
 		if (timer != null) {
 			clearTimeout(timer);
 		}
-		lastArgs = lastCallTime = lastThis = timer = undefined!;
+		lastArgs = undefined!;
+		lastCallTime = undefined!;
+		lastThis = undefined!;
+		timer = undefined!;
 	}
 
 	function flush() {
-		return timer != null ? trailingEdge() : result;
+		if (timer == null) return result;
+
+		clearTimeout(timer);
+		return trailingEdge();
 	}
 
-	function pending() {
+	function pending(): boolean {
 		return timer != null;
 	}
 
@@ -77,7 +88,12 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(fn: T, wai
 		const time = Date.now();
 		const isInvoking = shouldInvoke(time);
 
-		lastArgs = args;
+		if (aggregator != null && lastArgs) {
+			lastArgs = aggregator(lastArgs, args);
+		} else {
+			lastArgs = args;
+		}
+
 		// eslint-disable-next-line @typescript-eslint/no-this-alias
 		lastThis = this;
 		lastCallTime = time;
@@ -103,7 +119,6 @@ export function debounce<T extends (...args: any[]) => ReturnType<T>>(fn: T, wai
 }
 
 const comma = ',';
-const emptyStr = '';
 const equals = '=';
 const openBrace = '{';
 const openParen = '(';
@@ -119,7 +134,7 @@ export function getParameters(fn: Function): string[] {
 	if (fn.length === 0) return [];
 
 	let fnBody: string = Function.prototype.toString.call(fn);
-	fnBody = fnBody.replace(fnBodyStripCommentsRegex, emptyStr) || fnBody;
+	fnBody = fnBody.replace(fnBodyStripCommentsRegex, '') || fnBody;
 	fnBody = fnBody.slice(0, fnBody.indexOf(openBrace));
 
 	let open = fnBody.indexOf(openParen);
@@ -133,7 +148,7 @@ export function getParameters(fn: Function): string[] {
 
 	const match = fnBodyRegex.exec(fnBody);
 	return match != null
-		? match[1].split(comma).map(param => param.trim().replace(fnBodyStripParamDefaultValueRegex, emptyStr))
+		? match[1].split(comma).map(param => param.trim().replace(fnBodyStripParamDefaultValueRegex, ''))
 		: [];
 }
 
@@ -160,6 +175,23 @@ export function once<T extends (...args: any[]) => any>(fn: T): T {
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 		return result;
 	} as T;
+}
+
+type PartialArgs<T extends any[], P extends any[]> = {
+	[K in keyof P]: K extends keyof T ? T[K] : never;
+};
+
+type DropFirstN<T extends any[], N extends number, I extends any[] = []> = {
+	0: T;
+	1: T extends [infer _, ...infer R] ? DropFirstN<R, N, [any, ...I]> : T;
+}[I['length'] extends N ? 0 : 1];
+
+export function partial<T extends (...args: any[]) => any, P extends any[]>(
+	fn: T,
+	...partialArgs: PartialArgs<Parameters<T>, P>
+): (...rest: DropFirstN<Parameters<T>, P['length']>) => ReturnType<T> {
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	return (...rest) => fn(...partialArgs, ...rest);
 }
 
 export function propOf<T, K extends Extract<keyof T, string>>(o: T, key: K) {

@@ -5,7 +5,7 @@ import type { State } from './protocol';
 
 export function registerWelcomeWebviewPanel(controller: WebviewsController) {
 	return controller.registerWebviewPanel<State>(
-		Commands.ShowWelcomePage,
+		{ id: Commands.ShowWelcomePage },
 		{
 			id: 'gitlens.welcome',
 			fileName: 'welcome.html',
@@ -21,7 +21,9 @@ export function registerWelcomeWebviewPanel(controller: WebviewsController) {
 			},
 		},
 		async (container, host) => {
-			const { WelcomeWebviewProvider } = await import(/* webpackChunkName: "welcome" */ './welcomeWebview');
+			const { WelcomeWebviewProvider } = await import(
+				/* webpackChunkName: "webview-welcome" */ './welcomeWebview'
+			);
 			return new WelcomeWebviewProvider(container, host);
 		},
 	);

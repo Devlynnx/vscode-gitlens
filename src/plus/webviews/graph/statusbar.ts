@@ -5,8 +5,8 @@ import type { Container } from '../../../container';
 import { configuration } from '../../../system/configuration';
 import { getContext, onDidChangeContext } from '../../../system/context';
 import { once } from '../../../system/function';
-import type { SubscriptionChangeEvent } from '../../subscription/subscriptionService';
-import { arePlusFeaturesEnabled } from '../../subscription/utils';
+import type { SubscriptionChangeEvent } from '../../gk/account/subscriptionService';
+import { arePlusFeaturesEnabled } from '../../gk/utils';
 
 export class GraphStatusBarController implements Disposable {
 	private readonly _disposable: Disposable;
@@ -44,11 +44,11 @@ export class GraphStatusBarController implements Disposable {
 			configuration.get('graph.statusBar.enabled') && getContext('gitlens:enabled') && arePlusFeaturesEnabled();
 		if (enabled) {
 			if (this._statusBarItem == null) {
-				this._statusBarItem = window.createStatusBarItem('gitlens.graph', StatusBarAlignment.Left, 10000 - 3);
+				this._statusBarItem = window.createStatusBarItem('gitlens.graph', StatusBarAlignment.Left, 10000 - 2);
 				this._statusBarItem.name = 'GitLens Commit Graph';
 				this._statusBarItem.command = Commands.ShowGraph;
 				this._statusBarItem.text = '$(gitlens-graph)';
-				this._statusBarItem.tooltip = new MarkdownString('Visualize commits on the Commit Graph ✨');
+				this._statusBarItem.tooltip = new MarkdownString('Visualize commits on the Commit Graph');
 				this._statusBarItem.accessibilityInformation = {
 					label: `Show the GitLens Commit Graph`,
 				};

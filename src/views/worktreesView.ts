@@ -2,19 +2,20 @@ import type { CancellationToken, ConfigurationChangeEvent, Disposable } from 'vs
 import { ProgressLocation, ThemeColor, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import type { ViewFilesLayout, WorktreesViewConfig } from '../config';
 import type { Colors } from '../constants';
-import { Commands, GlyphChars } from '../constants';
+import { Commands, GlyphChars, proBadge } from '../constants';
 import type { Container } from '../container';
 import { PlusFeatures } from '../features';
 import { GitUri } from '../git/gitUri';
 import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import type { GitWorktree } from '../git/models/worktree';
-import { ensurePlusFeaturesEnabled } from '../plus/subscription/utils';
+import { ensurePlusFeaturesEnabled } from '../plus/gk/utils';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { WorktreeNode } from './nodes/worktreeNode';
 import { WorktreesNode } from './nodes/worktreesNode';
 import { ViewBase } from './viewBase';
@@ -45,9 +46,16 @@ export class WorktreesViewNode extends RepositoriesSubscribeableNode<WorktreesVi
 		if (access.allowed === false) return [];
 
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let repositories = this.view.container.git.openRepositories;
+			if (configuration.get('views.collapseWorktreesWhenPossible')) {
+				const grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No worktrees could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading worktrees...'
+					: 'No worktrees could be found.';
 
 				return [];
 			}
@@ -94,7 +102,7 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 	protected readonly configKey = 'worktrees';
 
 	constructor(container: Container) {
-		super(container, 'worktrees', 'Worktrees', 'workspaceView');
+		super(container, 'worktrees', 'Worktrees', 'worktreesView');
 
 		this.disposables.push(
 			window.registerFileDecorationProvider({
@@ -127,11 +135,15 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 				},
 			}),
 		);
-		this.description = '✨';
+		this.description = proBadge;
 	}
 
 	override get canReveal(): boolean {
 		return this.config.reveal || !configuration.get('views.repositories.showWorktrees');
+	}
+
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
 	}
 
 	override async show(options?: { preserveFocus?: boolean | undefined }): Promise<void> {
@@ -155,7 +167,7 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 			registerViewCommand(
 				this.getQualifiedCommand('refresh'),
 				async () => {
-					// this.container.git.resetCaches('worktrees');
+					this.container.git.resetCaches('worktrees');
 					return this.refresh(true);
 				},
 				this,
@@ -211,7 +223,9 @@ export class WorktreesView extends ViewBase<'worktrees', WorktreesViewNode, Work
 			!configuration.changed(e, 'defaultDateSource') &&
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
-			!configuration.changed(e, 'defaultTimeFormat')
+			!configuration.changed(e, 'defaultTimeFormat') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 			// !configuration.changed(e, 'sortWorktreesBy')
 		) {
 			return false;

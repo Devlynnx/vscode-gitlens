@@ -1,7 +1,7 @@
 import type { ExecException } from 'child_process';
 import { exec, execFile } from 'child_process';
 import type { Stats } from 'fs';
-import { exists, existsSync, statSync } from 'fs';
+import { access, constants, existsSync, statSync } from 'fs';
 import { join as joinPaths } from 'path';
 import * as process from 'process';
 import type { CancellationToken } from 'vscode';
@@ -227,7 +227,7 @@ export function run<T extends number | string | Buffer>(
 	encoding: BufferEncoding | 'buffer' | string,
 	options?: RunOptions & { exitCodeOnly?: boolean },
 ): Promise<T> {
-	const { stdin, stdinEncoding, ...opts }: RunOptions = { maxBuffer: 100 * 1024 * 1024, ...options };
+	const { stdin, stdinEncoding, ...opts }: RunOptions = { maxBuffer: 1000 * 1024 * 1024, ...options };
 
 	let killed = false;
 	return new Promise<T>((resolve, reject) => {
@@ -252,7 +252,7 @@ export function run<T extends number | string | Buffer>(
 					stdoutDecoded = stdout.toString();
 					stderrDecoded = stderr.toString();
 				} else {
-					const decode = (await import(/* webpackChunkName: "encoding" */ 'iconv-lite')).decode;
+					const decode = (await import(/* webpackChunkName: "lib-encoding" */ 'iconv-lite')).decode;
 					stdoutDecoded = decode(Buffer.from(stdout, 'binary'), encoding);
 					stderrDecoded = decode(Buffer.from(stderr, 'binary'), encoding);
 				}
@@ -268,7 +268,7 @@ export function run<T extends number | string | Buffer>(
 			if (encoding === 'utf8' || encoding === 'binary' || encoding === 'buffer') {
 				resolve(stdout as T);
 			} else {
-				const decode = (await import(/* webpackChunkName: "encoding" */ 'iconv-lite')).decode;
+				const decode = (await import(/* webpackChunkName: "lib-encoding" */ 'iconv-lite')).decode;
 				resolve(decode(Buffer.from(stdout, 'binary'), encoding) as T);
 			}
 		});
@@ -290,6 +290,6 @@ export function run<T extends number | string | Buffer>(
 	});
 }
 
-export function fsExists(path: string) {
-	return new Promise<boolean>(resolve => exists(path, exists => resolve(exists)));
+export async function fsExists(path: string) {
+	return new Promise<boolean>(resolve => access(path, constants.F_OK, err => resolve(err == null)));
 }

@@ -127,17 +127,23 @@ input[type='checkbox'] {
 	cursor: pointer;
 	margin: 0;
 	padding: 0 10px;
-	mix-blend-mode: luminosity;
+	accent-color: var(--color-background--lighten-30);
 
 	&:focus {
 		background: rgba(0, 0, 0, 0.1);
 		border-radius: 5px;
-		outline: none;
+		outline: 1px solid var(--vscode-focusBorder);
+		outline-offset: -1px;
 	}
 
 	&[disabled] {
 		color: var(--color-foreground--75);
 		cursor: default;
+	}
+
+	.vscode-high-contrast-light &,
+	.vscode-light & {
+		accent-color: var(--color-background--darken-50);
 	}
 }
 
@@ -289,9 +295,8 @@ ul {
 }
 
 code {
-	background: rgba(255, 255, 255, 0.05);
+	background: var(--vscode-textCodeBlock-background);
 	color: var(--color-foreground--75);
 	border-radius: 3px;
-	padding: 2px 4px;
-	vertical-align: middle;
+	padding: 0px 4px 2px 4px;
 }

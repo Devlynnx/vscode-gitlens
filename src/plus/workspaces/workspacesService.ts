@@ -6,13 +6,13 @@ import type { GitRemote } from '../../git/models/remote';
 import { RemoteResourceType } from '../../git/models/remoteResource';
 import { Repository } from '../../git/models/repository';
 import { showRepositoriesPicker } from '../../quickpicks/repositoryPicker';
-import { SubscriptionState } from '../../subscription';
 import { log } from '../../system/decorators/log';
 import { normalizePath } from '../../system/path';
 import type { OpenWorkspaceLocation } from '../../system/utils';
 import { openWorkspace } from '../../system/utils';
+import { SubscriptionState } from '../gk/account/subscription';
+import type { SubscriptionChangeEvent } from '../gk/account/subscriptionService';
 import type { ServerConnection } from '../gk/serverConnection';
-import type { SubscriptionChangeEvent } from '../subscription/subscriptionService';
 import type {
 	AddWorkspaceRepoDescriptor,
 	CloudWorkspaceData,
@@ -174,16 +174,17 @@ export class WorkspacesService implements Disposable {
 		const workspaceFileData: LocalWorkspaceData =
 			(await this._workspacesPathProvider.getLocalWorkspaceData())?.workspaces || {};
 		for (const workspace of Object.values(workspaceFileData)) {
+			if (workspace.localId == null || workspace.name == null) continue;
 			localWorkspaces.push(
 				new LocalWorkspace(
 					this.container,
 					workspace.localId,
 					workspace.name,
-					workspace.repositories.map(repositoryPath => ({
+					workspace.repositories?.map(repositoryPath => ({
 						localPath: repositoryPath.localPath,
 						name: repositoryPath.localPath.split(/[\\/]/).pop() ?? 'unknown',
 						workspaceId: workspace.localId,
-					})),
+					})) ?? [],
 					this._currentWorkspaceId != null && this._currentWorkspaceId === workspace.localId,
 				),
 			);
@@ -342,7 +343,7 @@ export class WorkspacesService implements Disposable {
 				repositoriesToAdd,
 			);
 			if (pick.length === 0) return;
-			chosenRepoPaths = pick.map(p => p.repoPath);
+			chosenRepoPaths = pick.map(p => p.path);
 		} else {
 			chosenRepoPaths = repositoriesToAdd.map(r => r.path);
 		}
@@ -497,10 +498,14 @@ export class WorkspacesService implements Disposable {
 			provider = workspace.provider;
 		}
 
-		if (descriptor.id != null && descriptor.url != null && provider != null) {
+		if (
+			descriptor.id != null &&
+			(descriptor.url != null ||
+				(descriptor.provider_organization_id != null && descriptor.name != null && provider != null))
+		) {
 			await this.container.repositoryPathMapping.writeLocalRepoPath(
 				{
-					remoteUrl: descriptor.url,
+					remoteUrl: descriptor.url ?? undefined,
 					repoInfo: {
 						provider: provider,
 						owner: descriptor.provider_organization_id,
@@ -509,6 +514,9 @@ export class WorkspacesService implements Disposable {
 				},
 				repoPath,
 			);
+		}
+
+		if (descriptor.id != null) {
 			await this.updateCloudWorkspaceRepoLocalPath(workspaceId, descriptor.id, repoPath);
 		}
 	}
@@ -899,7 +907,7 @@ export class WorkspacesService implements Disposable {
 				validRepos,
 			);
 			if (pick.length === 0) return;
-			reposOrRepoPaths = pick.map(p => p.repoPath);
+			reposOrRepoPaths = pick.map(p => p.path);
 		}
 
 		if (reposOrRepoPaths == null) return;

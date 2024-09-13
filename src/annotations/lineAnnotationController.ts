@@ -5,27 +5,27 @@ import type { Container } from '../container';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
 import type { PullRequest } from '../git/models/pullRequest';
 import { detailsMessage } from '../hovers/hovers';
-import type { MaybePausedResult } from '../system/cancellation';
-import { pauseOnCancelOrTimeoutMap } from '../system/cancellation';
 import { configuration } from '../system/configuration';
 import { debug, log } from '../system/decorators/log';
 import { once } from '../system/event';
 import { debounce } from '../system/function';
 import { Logger } from '../system/logger';
 import { getLogScope, setLogScopeExit } from '../system/logger.scope';
-import { getSettledValue } from '../system/promise';
+import type { MaybePausedResult } from '../system/promise';
+import { getSettledValue, pauseOnCancelOrTimeoutMap } from '../system/promise';
 import { isTextEditor } from '../system/utils';
-import type { GitLineState, LinesChangeEvent } from '../trackers/gitLineTracker';
+import type { LinesChangeEvent, LineState } from '../trackers/lineTracker';
 import { getInlineDecoration } from './annotations';
+import type { BlameFontOptions } from './gutterBlameAnnotationProvider';
 
 const annotationDecoration: TextEditorDecorationType = window.createTextEditorDecorationType({
 	after: {
 		margin: '0 0 0 3em',
 		textDecoration: 'none',
 	},
-	rangeBehavior: DecorationRangeBehavior.ClosedOpen,
+	rangeBehavior: DecorationRangeBehavior.OpenOpen,
 });
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
 export class LineAnnotationController implements Disposable {
 	private _cancellation: CancellationTokenSource | undefined;
@@ -38,7 +38,7 @@ export class LineAnnotationController implements Disposable {
 			once(container.onReady)(this.onReady, this),
 			configuration.onDidChange(this.onConfigurationChanged, this),
 			container.fileAnnotations.onDidToggleAnnotations(this.onFileAnnotationsToggled, this),
-			container.richRemoteProviders.onAfterDidChangeConnectionState(
+			container.integrations.onDidChangeConnectionState(
 				debounce(() => void this.refresh(window.activeTextEditor), 250),
 			),
 		);
@@ -152,12 +152,12 @@ export class LineAnnotationController implements Disposable {
 
 	private getPullRequestsForLines(
 		repoPath: string,
-		lines: Map<number, GitLineState>,
+		lines: Map<number, LineState>,
 	): Map<string, Promise<PullRequest | undefined>> {
 		const prs = new Map<string, Promise<PullRequest | undefined>>();
 		if (lines.size === 0) return prs;
 
-		const remotePromise = this.container.git.getBestRemoteWithRichProvider(repoPath);
+		const remotePromise = this.container.git.getBestRemoteWithIntegration(repoPath);
 
 		for (const [, state] of lines) {
 			if (state.commit.isUncommitted) continue;
@@ -204,7 +204,7 @@ export class LineAnnotationController implements Disposable {
 			return;
 		}
 
-		const trackedDocument = await this.container.tracker.getOrAdd(editor.document);
+		const trackedDocument = await this.container.documentTracker.getOrAdd(editor.document);
 		if (!trackedDocument.isBlameable && this.suspended) {
 			if (scope != null) {
 				scope.exitDetails = ` ${GlyphChars.Dot} Skipped because the ${
@@ -238,8 +238,10 @@ export class LineAnnotationController implements Disposable {
 				.join()}`;
 		}
 
+		let uncommittedOnly = true;
+
 		const commitPromises = new Map<string, Promise<void>>();
-		const lines = new Map<number, GitLineState>();
+		const lines = new Map<number, LineState>();
 		for (const selection of selections) {
 			const state = this.container.lineTracker.getState(selection.active);
 			if (state?.commit == null) {
@@ -251,6 +253,9 @@ export class LineAnnotationController implements Disposable {
 				commitPromises.set(state.commit.ref, state.commit.ensureFullDetails());
 			}
 			lines.set(selection.active, state);
+			if (!state.commit.isUncommitted) {
+				uncommittedOnly = false;
+			}
 		}
 
 		const repoPath = trackedDocument.uri.repoPath;
@@ -268,6 +273,7 @@ export class LineAnnotationController implements Disposable {
 		}
 
 		const getPullRequests =
+			!uncommittedOnly &&
 			repoPath != null &&
 			cfg.pullRequests.enabled &&
 			CommitFormatter.has(
@@ -294,6 +300,13 @@ export class LineAnnotationController implements Disposable {
 			prs: Map<string, MaybePausedResult<PullRequest | undefined>> | undefined,
 			timeout?: number,
 		) {
+			const fontOptions: BlameFontOptions = {
+				family: cfg.fontFamily,
+				size: cfg.fontSize,
+				style: cfg.fontStyle,
+				weight: cfg.fontWeight,
+			};
+
 			const decorations = [];
 
 			for (const [l, state] of lines) {
@@ -313,6 +326,7 @@ export class LineAnnotationController implements Disposable {
 						pullRequest: pr?.value,
 						pullRequestPendingMessage: `PR ${GlyphChars.Ellipsis}`,
 					},
+					fontOptions,
 					cfg.scrollable,
 				) as DecorationOptions;
 				decoration.range = editor.document.validateRange(new Range(l, maxSmallIntegerV8, l, maxSmallIntegerV8));

@@ -6,10 +6,10 @@ import { configuration } from '../system/configuration';
 import { debug } from '../system/decorators/log';
 import { once } from '../system/event';
 import { Logger } from '../system/logger';
-import type { LinesChangeEvent } from '../trackers/gitLineTracker';
+import type { LinesChangeEvent } from '../trackers/lineTracker';
 import { changesMessage, detailsMessage } from './hovers';
 
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
 export class LineHoverController implements Disposable {
 	private readonly _disposable: Disposable;
@@ -120,7 +120,7 @@ export class LineHoverController implements Disposable {
 		const commitLine = commit.lines.find(l => l.line === line) ?? commit.lines[0];
 		editorLine = commitLine.originalLine - 1;
 
-		const trackedDocument = await this.container.tracker.get(document);
+		const trackedDocument = await this.container.documentTracker.get(document);
 		if (trackedDocument == null || token.isCancellationRequested) return undefined;
 
 		const message =
@@ -175,7 +175,7 @@ export class LineHoverController implements Disposable {
 		);
 		if (!wholeLine && range.start.character !== position.character) return undefined;
 
-		const trackedDocument = await this.container.tracker.get(document);
+		const trackedDocument = await this.container.documentTracker.get(document);
 		if (trackedDocument == null) return undefined;
 
 		const message = await changesMessage(

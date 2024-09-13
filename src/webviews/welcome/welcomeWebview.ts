@@ -1,15 +1,16 @@
 import type { ConfigurationChangeEvent } from 'vscode';
 import { Disposable, workspace } from 'vscode';
+import type { ContextKeys } from '../../constants';
 import type { Container } from '../../container';
-import type { SubscriptionChangeEvent } from '../../plus/subscription/subscriptionService';
-import type { Subscription } from '../../subscription';
-import { SubscriptionState } from '../../subscription';
+import type { Subscription } from '../../plus/gk/account/subscription';
+import { isSubscriptionPaid, SubscriptionState } from '../../plus/gk/account/subscription';
+import type { SubscriptionChangeEvent } from '../../plus/gk/account/subscriptionService';
 import { configuration } from '../../system/configuration';
+import { getContext, onDidChangeContext } from '../../system/context';
 import type { IpcMessage } from '../protocol';
-import { onIpc } from '../protocol';
-import type { WebviewController, WebviewProvider } from '../webviewController';
+import type { WebviewHost, WebviewProvider } from '../webviewProvider';
 import type { State, UpdateConfigurationParams } from './protocol';
-import { DidChangeNotificationType, UpdateConfigurationCommandType } from './protocol';
+import { DidChangeNotification, DidChangeOrgSettings, UpdateConfigurationCommand } from './protocol';
 
 const emptyDisposable = Object.freeze({
 	dispose: () => {
@@ -22,7 +23,7 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 
 	constructor(
 		private readonly container: Container,
-		private readonly host: WebviewController<State>,
+		private readonly host: WebviewHost,
 	) {
 		this._disposable = Disposable.from(
 			configuration.onDidChange(this.onConfigurationChanged, this),
@@ -31,6 +32,7 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 				? workspace.onDidGrantWorkspaceTrust(() => this.notifyDidChange(), this)
 				: emptyDisposable,
 			this.container.subscription.onDidChange(this.onSubscriptionChanged, this),
+			onDidChangeContext(this.onContextChanged, this),
 		);
 	}
 
@@ -46,6 +48,19 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 		void this.notifyDidChange();
 	}
 
+	private getOrgSettings(): State['orgSettings'] {
+		return {
+			ai: getContext('gitlens:gk:organization:ai:enabled', false),
+			drafts: getContext('gitlens:gk:organization:drafts:enabled', false),
+		};
+	}
+
+	private onContextChanged(key: keyof ContextKeys) {
+		if (['gitlens:gk:organization:ai:enabled', 'gitlens:gk:organization:drafts:enabled'].includes(key)) {
+			this.notifyDidChangeOrgSettings();
+		}
+	}
+
 	private onSubscriptionChanged(e: SubscriptionChangeEvent) {
 		void this.notifyDidChange(e.current);
 	}
@@ -57,16 +72,16 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 	}
 
 	onMessageReceived(e: IpcMessage) {
-		switch (e.method) {
-			case UpdateConfigurationCommandType.method:
-				onIpc(UpdateConfigurationCommandType, e, params => this.updateConfiguration(params));
+		switch (true) {
+			case UpdateConfigurationCommand.is(e):
+				this.updateConfiguration(e.params);
 				break;
 		}
 	}
+
 	private async getState(subscription?: Subscription): Promise<State> {
 		return {
-			webviewId: this.host.id,
-			timestamp: Date.now(),
+			...this.host.baseWebviewState,
 			version: this.container.version,
 			// Make sure to get the raw config so to avoid having the mode mixed in
 			config: {
@@ -78,6 +93,8 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 				this.container.git.openRepositoryCount === 0 ||
 				this.container.git.hasUnsafeRepositories(),
 			isTrialOrPaid: await this.getTrialOrPaidState(subscription),
+			canShowPromo: await this.getCanShowPromo(subscription),
+			orgSettings: this.getOrgSettings(),
 		};
 	}
 
@@ -91,11 +108,27 @@ export class WelcomeWebviewProvider implements WebviewProvider<State> {
 		return false;
 	}
 
+	private async getCanShowPromo(subscription?: Subscription): Promise<boolean> {
+		const expiresTime = new Date('2023-12-31T07:59:00.000Z').getTime(); // 2023-12-30 23:59:00 PST-0800
+		if (Date.now() > expiresTime) {
+			return false;
+		}
+
+		const sub = subscription ?? (await this.container.subscription.getSubscription(true));
+		return !isSubscriptionPaid(sub);
+	}
+
 	private updateConfiguration(params: UpdateConfigurationParams) {
 		void configuration.updateEffective(`${params.type}.enabled`, params.value);
 	}
 
 	private async notifyDidChange(subscription?: Subscription) {
-		void this.host.notify(DidChangeNotificationType, { state: await this.getState(subscription) });
+		void this.host.notify(DidChangeNotification, { state: await this.getState(subscription) });
+	}
+
+	private notifyDidChangeOrgSettings() {
+		void this.host.notify(DidChangeOrgSettings, {
+			orgSettings: this.getOrgSettings(),
+		});
 	}
 }

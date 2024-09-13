@@ -4,10 +4,20 @@ import { GitBranch } from '../../git/models/branch';
 import type { GitCommit } from '../../git/models/commit';
 import { getIssueOrPullRequestMarkdownIcon, getIssueOrPullRequestThemeIcon } from '../../git/models/issue';
 import type { PullRequest } from '../../git/models/pullRequest';
+import { getComparisonRefsForPullRequest } from '../../git/models/pullRequest';
+import type { GitBranchReference } from '../../git/models/reference';
+import { createRevisionRange } from '../../git/models/reference';
+import { getAheadBehindFilesQuery, getCommitsQuery } from '../../git/queryResults';
+import { pluralize } from '../../system/string';
 import type { ViewsWithCommits } from '../viewBase';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
+import type { ClipboardType, ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
+import { CodeSuggestionsNode } from './codeSuggestionsNode';
+import { ResultsCommitsNode } from './resultsCommitsNode';
+import { ResultsFilesNode } from './resultsFilesNode';
 
-export class PullRequestNode extends ViewNode<ViewsWithCommits> {
+export class PullRequestNode extends CacheableChildrenViewNode<'pullrequest', ViewsWithCommits> {
 	readonly repoPath: string;
 
 	constructor(
@@ -15,6 +25,7 @@ export class PullRequestNode extends ViewNode<ViewsWithCommits> {
 		protected override readonly parent: ViewNode,
 		public readonly pullRequest: PullRequest,
 		branchOrCommitOrRepoPath: GitBranch | GitCommit | string,
+		private readonly options?: { expand?: boolean },
 	) {
 		let branchOrCommit;
 		let repoPath;
@@ -25,7 +36,7 @@ export class PullRequestNode extends ViewNode<ViewsWithCommits> {
 			branchOrCommit = branchOrCommitOrRepoPath;
 		}
 
-		super(GitUri.fromRepoPath(repoPath), view, parent);
+		super('pullrequest', GitUri.fromRepoPath(repoPath), view, parent);
 
 		if (branchOrCommit != null) {
 			if (branchOrCommit instanceof GitBranch) {
@@ -35,7 +46,8 @@ export class PullRequestNode extends ViewNode<ViewsWithCommits> {
 			}
 		}
 
-		this._uniqueId = getViewNodeId('pullrequest', this.context);
+		this.updateContext({ pullRequest: pullRequest });
+		this._uniqueId = getViewNodeId(this.type, this.context);
 		this.repoPath = repoPath;
 	}
 
@@ -43,18 +55,122 @@ export class PullRequestNode extends ViewNode<ViewsWithCommits> {
 		return this._uniqueId;
 	}
 
-	override toClipboard(): string {
+	override toClipboard(type?: ClipboardType): string {
+		switch (type) {
+			case 'markdown':
+				return `[${this.pullRequest.id}](${this.pullRequest.url}) ${this.pullRequest.title}`;
+			default:
+				return this.pullRequest.url;
+		}
+	}
+
+	override getUrl(): string {
 		return this.pullRequest.url;
 	}
 
-	getChildren(): ViewNode[] {
-		return [];
+	get baseRef(): GitBranchReference | undefined {
+		if (this.pullRequest.refs?.base != null) {
+			return {
+				refType: 'branch',
+				repoPath: this.repoPath,
+				ref: this.pullRequest.refs.base.sha,
+				name: this.pullRequest.refs.base.branch,
+				remote: true,
+			};
+		}
+		return undefined;
+	}
+
+	get ref(): GitBranchReference | undefined {
+		if (this.pullRequest.refs?.head != null) {
+			return {
+				refType: 'branch',
+				repoPath: this.repoPath,
+				ref: this.pullRequest.refs.head.sha,
+				name: this.pullRequest.refs.head.branch,
+				remote: true,
+			};
+		}
+		return undefined;
+	}
+
+	async getChildren(): Promise<ViewNode[]> {
+		if (this.children == null) {
+			const refs = await getComparisonRefsForPullRequest(
+				this.view.container,
+				this.repoPath,
+				this.pullRequest.refs!,
+			);
+
+			const comparison = {
+				ref1: refs.base.ref,
+				ref2: refs.head.ref,
+			};
+
+			const aheadBehindCounts = await this.view.container.git.getAheadBehindCommitCount(this.repoPath, [
+				createRevisionRange(comparison.ref2, comparison.ref1, '...'),
+			]);
+
+			const children = [
+				new ResultsCommitsNode(
+					this.view,
+					this,
+					this.repoPath,
+					'Commits',
+					{
+						query: getCommitsQuery(
+							this.view.container,
+							this.repoPath,
+							createRevisionRange(comparison.ref1, comparison.ref2, '..'),
+						),
+						comparison: comparison,
+					},
+					{
+						autolinks: false,
+						expand: false,
+						description: pluralize('commit', aheadBehindCounts?.ahead ?? 0),
+					},
+				),
+				new CodeSuggestionsNode(this.view, this, this.repoPath, this.pullRequest),
+				new ResultsFilesNode(
+					this.view,
+					this,
+					this.repoPath,
+					comparison.ref1,
+					comparison.ref2,
+					() =>
+						getAheadBehindFilesQuery(
+							this.view.container,
+							this.repoPath,
+							createRevisionRange(comparison.ref1, comparison.ref2, '...'),
+							false,
+						),
+					undefined,
+					{ expand: true, timeout: false },
+				),
+			];
+
+			this.children = children;
+		}
+		return this.children;
 	}
 
 	getTreeItem(): TreeItem {
-		const item = new TreeItem(`#${this.pullRequest.id}: ${this.pullRequest.title}`, TreeItemCollapsibleState.None);
+		const hasRefs = this.pullRequest.refs?.base != null && this.pullRequest.refs.head != null;
+
+		const item = new TreeItem(
+			`#${this.pullRequest.id}: ${this.pullRequest.title}`,
+			hasRefs
+				? this.options?.expand
+					? TreeItemCollapsibleState.Expanded
+					: TreeItemCollapsibleState.Collapsed
+				: TreeItemCollapsibleState.None,
+		);
 		item.id = this.id;
 		item.contextValue = ContextValues.PullRequest;
+		if (this.pullRequest.refs?.base != null && this.pullRequest.refs.head != null) {
+			item.contextValue += `+refs`;
+		}
 		item.description = `${this.pullRequest.state}, ${this.pullRequest.formatDateFromNow()}`;
 		item.iconPath = getIssueOrPullRequestThemeIcon(this.pullRequest);
 

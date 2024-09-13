@@ -173,6 +173,10 @@ export class GitCommit implements GitRevisionReference {
 	}
 
 	private _resolvedPreviousSha: string | undefined;
+	get resolvedPreviousSha(): string | undefined {
+		return this._resolvedPreviousSha;
+	}
+
 	get unresolvedPreviousSha(): string {
 		const previousSha =
 			this._resolvedPreviousSha ??
@@ -215,6 +219,8 @@ export class GitCommit implements GitRevisionReference {
 			if (this._files == null) {
 				this._files = this.file != null ? [this.file] : [];
 			}
+
+			this._recomputeStats = true;
 
 			return;
 		}
@@ -415,16 +421,25 @@ export class GitCommit implements GitRevisionReference {
 		return status;
 	}
 
-	async getAssociatedPullRequest(remote?: GitRemote<RemoteProvider>): Promise<PullRequest | undefined> {
-		remote ??= await this.container.git.getBestRemoteWithRichProvider(this.repoPath);
-		return remote?.hasRichIntegration() ? remote.provider.getPullRequestForCommit(this.ref) : undefined;
+	async getAssociatedPullRequest(
+		remote?: GitRemote<RemoteProvider>,
+		options?: { expiryOverride?: boolean | number },
+	): Promise<PullRequest | undefined> {
+		remote ??= await this.container.git.getBestRemoteWithIntegration(this.repoPath);
+		if (!remote?.hasIntegration()) return undefined;
+
+		return (await this.container.integrations.getByRemote(remote))?.getPullRequestForCommit(
+			remote.provider.repoDesc,
+			this.ref,
+			options,
+		);
 	}
 
 	async getEnrichedAutolinks(remote?: GitRemote<RemoteProvider>): Promise<Map<string, EnrichedAutolink> | undefined> {
 		if (this.isUncommitted) return undefined;
 
-		remote ??= await this.container.git.getBestRemoteWithRichProvider(this.repoPath);
-		if (!remote?.hasRichIntegration()) return undefined;
+		remote ??= await this.container.git.getBestRemoteWithIntegration(this.repoPath);
+		if (remote?.provider == null) return undefined;
 
 		// TODO@eamodio should we cache these? Seems like we would use more memory than it's worth
 		// async function getCore(this: GitCommit): Promise<Map<string, EnrichedAutolink> | undefined> {
@@ -514,7 +529,10 @@ export class GitCommit implements GitRevisionReference {
 				}
 
 				const parent = this.parents[0];
-				if (parent != null && isSha(parent)) return parent;
+				if (parent != null && isSha(parent)) {
+					this._resolvedPreviousSha = parent;
+					return parent;
+				}
 
 				const sha = await this.container.git.resolveReference(
 					this.repoPath,
@@ -545,6 +563,7 @@ export class GitCommit implements GitRevisionReference {
 		parents?: string[];
 		files?: { file?: GitFileChange | null; files?: GitFileChange[] | null } | null;
 		lines?: GitCommitLine[];
+		stats?: GitCommitStats;
 	}): GitCommit {
 		let files;
 		if (changes.files != null) {
@@ -575,7 +594,7 @@ export class GitCommit implements GitRevisionReference {
 			this.getChangedValue(changes.parents, this.parents) ?? [],
 			this.message,
 			files,
-			this.stats,
+			this.getChangedValue(changes.stats, this.stats),
 			this.getChangedValue(changes.lines, this.lines),
 			this.tips,
 			this.stashName,

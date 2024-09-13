@@ -7,14 +7,15 @@ import { GitUri } from '../git/gitUri';
 import type { GitTagReference } from '../git/models/reference';
 import { getReferenceLabel } from '../git/models/reference';
 import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode';
 import { TagsNode } from './nodes/tagsNode';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
 
@@ -35,9 +36,16 @@ export class TagsRepositoryNode extends RepositoryFolderNode<TagsView, TagsNode>
 export class TagsViewNode extends RepositoriesSubscribeableNode<TagsView, TagsRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let repositories = this.view.container.git.openRepositories;
+			if (configuration.get('views.collapseWorktreesWhenPossible')) {
+				const grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No tags could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading tags...'
+					: 'No tags could be found.';
 
 				return [];
 			}
@@ -89,6 +97,10 @@ export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 
 	override get canReveal(): boolean {
 		return this.config.reveal || !configuration.get('views.repositories.showTags');
+	}
+
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
 	}
 
 	protected getRoot() {
@@ -145,7 +157,9 @@ export class TagsView extends ViewBase<'tags', TagsViewNode, TagsViewConfig> {
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
 			!configuration.changed(e, 'defaultTimeFormat') &&
-			!configuration.changed(e, 'sortTagsBy')
+			!configuration.changed(e, 'sortTagsBy') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 		) {
 			return false;
 		}

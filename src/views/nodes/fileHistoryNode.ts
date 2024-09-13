@@ -9,19 +9,24 @@ import { configuration } from '../../system/configuration';
 import { gate } from '../../system/decorators/gate';
 import { debug } from '../../system/decorators/log';
 import { memoize } from '../../system/decorators/memoize';
+import { weakEvent } from '../../system/event';
 import { filterMap, flatMap, map, uniqueBy } from '../../system/iterable';
 import { Logger } from '../../system/logger';
 import { basename } from '../../system/path';
 import type { FileHistoryView } from '../fileHistoryView';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
+import type { PageableViewNode, ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { CommitNode } from './commitNode';
 import { LoadMoreNode, MessageNode } from './common';
 import { FileHistoryTrackerNode } from './fileHistoryTrackerNode';
 import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode';
 import { insertDateMarkers } from './helpers';
-import type { PageableViewNode, ViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, SubscribeableViewNode } from './viewNode';
 
-export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> implements PageableViewNode {
+export class FileHistoryNode
+	extends SubscribeableViewNode<'file-history', FileHistoryView>
+	implements PageableViewNode
+{
 	limit: number | undefined;
 
 	protected override splatted = true;
@@ -33,12 +38,12 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 		private readonly folder: boolean,
 		private readonly branch: GitBranch | undefined,
 	) {
-		super(uri, view, parent);
+		super('file-history', uri, view, parent);
 
 		if (branch != null) {
 			this.updateContext({ branch: branch });
 		}
-		this._uniqueId = getViewNodeId(`file-history+${uri.toString()}`, this.context);
+		this._uniqueId = getViewNodeId(`${this.type}+${uri.toString()}`, this.context);
 		this.limit = this.view.getNodeLastKnownLimit(this);
 	}
 
@@ -65,9 +70,7 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 				? this.view.container.git.getStatusForFiles(this.uri.repoPath, this.getPathOrGlob())
 				: undefined,
 			this.uri.sha == null ? this.view.container.git.getCurrentUser(this.uri.repoPath) : undefined,
-			this.branch != null
-				? this.view.container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.branch.name)
-				: undefined,
+			this.view.container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.branch?.name),
 			range
 				? this.view.container.git.getLogRefsOnly(this.uri.repoPath, {
 						limit: 0,
@@ -83,7 +86,15 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 					uniqueBy(
 						flatMap(fileStatuses, f => f.getPseudoCommits(this.view.container, currentUser)),
 						c => c.sha,
-						(original, c) => original.with({ files: { files: [...original.files!, ...c.files!] } }),
+						(original, c) =>
+							original.with({
+								files: {
+									files: [
+										...(original.files ?? (original.file != null ? [original.file] : [])),
+										...(c.files ?? (c.file != null ? [c.file] : [])),
+									],
+								},
+							}),
 					),
 					commit => new CommitNode(this.view, this, commit),
 				);
@@ -110,18 +121,18 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 									c,
 									unpublishedCommits?.has(c.ref),
 									this.branch,
-									undefined,
+									getBranchAndTagTips,
 									{
 										expand: false,
 									},
 							  )
 							: c.file != null
-							? new FileRevisionAsCommitNode(this.view, this, c.file, c, {
-									branch: this.branch,
-									getBranchAndTagTips: getBranchAndTagTips,
-									unpublished: unpublishedCommits?.has(c.ref),
-							  })
-							: undefined,
+							  ? new FileRevisionAsCommitNode(this.view, this, c.file, c, {
+										branch: this.branch,
+										getBranchAndTagTips: getBranchAndTagTips,
+										unpublished: unpublishedCommits?.has(c.ref),
+							    })
+							  : undefined,
 					),
 					this,
 				),
@@ -175,14 +186,17 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 		if (repo == null) return undefined;
 
 		const subscription = Disposable.from(
-			repo.onDidChange(this.onRepositoryChanged, this),
-			repo.onDidChangeFileSystem(this.onFileSystemChanged, this),
-			repo.startWatchingFileSystem(),
-			configuration.onDidChange(e => {
-				if (configuration.changed(e, 'advanced.fileHistoryFollowsRenames')) {
-					this.view.resetNodeLastKnownLimit(this);
-				}
-			}),
+			weakEvent(repo.onDidChange, this.onRepositoryChanged, this),
+			weakEvent(repo.onDidChangeFileSystem, this.onFileSystemChanged, this, [repo.watchFileSystem()]),
+			weakEvent(
+				configuration.onDidChange,
+				e => {
+					if (configuration.changed(e, 'advanced.fileHistoryFollowsRenames')) {
+						this.view.resetNodeLastKnownLimit(this);
+					}
+				},
+				this,
+			),
 		);
 
 		return subscription;
@@ -261,7 +275,7 @@ export class FileHistoryNode extends SubscribeableViewNode<FileHistoryView> impl
 			},
 			() => this.getLog(),
 		);
-		if (log == null || !log.hasMore) return;
+		if (!log?.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
 		if (this._log === log) return;

@@ -7,12 +7,12 @@ import type { Repository } from '../../git/models/repository';
 import { makeHierarchical } from '../../system/array';
 import { log } from '../../system/decorators/log';
 import type { ViewsWithRemotes } from '../viewBase';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 import { BranchNode } from './branchNode';
 import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
 import { MessageNode } from './common';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class RemoteNode extends ViewNode<ViewsWithRemotes> {
+export class RemoteNode extends ViewNode<'remote', ViewsWithRemotes> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithRemotes,
@@ -20,10 +20,10 @@ export class RemoteNode extends ViewNode<ViewsWithRemotes> {
 		public readonly repo: Repository,
 		public readonly remote: GitRemote,
 	) {
-		super(uri, view, parent);
+		super('remote', uri, view, parent);
 
 		this.updateContext({ repository: repo, remote: remote });
-		this._uniqueId = getViewNodeId('remote', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
@@ -92,14 +92,19 @@ export class RemoteNode extends ViewNode<ViewsWithRemotes> {
 				provider.avatarUri != null && this.view.config.avatars
 					? provider.avatarUri
 					: provider.icon === 'remote'
-					? new ThemeIcon('cloud')
-					: {
-							dark: this.view.container.context.asAbsolutePath(`images/dark/icon-${provider.icon}.svg`),
-							light: this.view.container.context.asAbsolutePath(`images/light/icon-${provider.icon}.svg`),
-					  };
+					  ? new ThemeIcon('cloud')
+					  : {
+								dark: this.view.container.context.asAbsolutePath(
+									`images/dark/icon-${provider.icon}.svg`,
+								),
+								light: this.view.container.context.asAbsolutePath(
+									`images/light/icon-${provider.icon}.svg`,
+								),
+					    };
 
-			if (provider.hasRichIntegration()) {
-				const connected = provider.maybeConnected ?? (await provider.isConnected());
+			if (this.remote.hasIntegration()) {
+				const integration = await this.view.container.integrations.getByRemote(this.remote);
+				const connected = integration?.maybeConnected ?? (await integration?.isConnected());
 
 				item.contextValue = `${ContextValues.Remote}${connected ? '+connected' : '+disconnected'}`;
 				item.tooltip = `${this.remote.name} (${provider.name} ${GlyphChars.Dash} ${

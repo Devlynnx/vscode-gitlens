@@ -9,8 +9,8 @@ const CopyPlugin = require('copy-webpack-plugin');
 const CspHtmlPlugin = require('csp-html-webpack-plugin');
 const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
 const esbuild = require('esbuild');
-const { EsbuildPlugin } = require('esbuild-loader');
-const { generateFonts } = require('fantasticon');
+const { ESLintLitePlugin } = require('@eamodio/eslint-lite-webpack-plugin');
+const { generateFonts } = require('@twbs/fantasticon');
 const ForkTsCheckerPlugin = require('fork-ts-checker-webpack-plugin');
 const fs = require('fs');
 const HtmlPlugin = require('html-webpack-plugin');
@@ -24,7 +24,7 @@ const WebpackRequireFromPlugin = require('webpack-require-from');
 
 module.exports =
 	/**
-	 * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; esbuildMinify?: boolean; useSharpForImageOptimization?: boolean } | undefined } env
+	 * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; skipLint?: boolean } | undefined } env
 	 * @param {{ mode: 'production' | 'development' | 'none' | undefined }} argv
 	 * @returns { WebpackConfig[] }
 	 */
@@ -35,8 +35,7 @@ module.exports =
 			analyzeBundle: false,
 			analyzeDeps: false,
 			esbuild: true,
-			esbuildMinify: false,
-			useSharpForImageOptimization: true,
+			skipLint: false,
 			...env,
 		};
 
@@ -50,7 +49,7 @@ module.exports =
 /**
  * @param { 'node' | 'webworker' } target
  * @param { 'production' | 'development' | 'none' } mode
- * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; esbuildMinify?: boolean; useSharpForImageOptimization?: boolean }} env
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; skipLint?: boolean }} env
  * @returns { WebpackConfig }
  */
 function getExtensionConfig(target, mode, env) {
@@ -61,26 +60,30 @@ function getExtensionConfig(target, mode, env) {
 		new CleanPlugin({ cleanOnceBeforeBuildPatterns: ['!dist/webviews/**'] }),
 		new ForkTsCheckerPlugin({
 			async: false,
-			eslint: {
-				enabled: true,
-				files: 'src/**/*.ts?(x)',
-				options: {
-					cache: true,
-					cacheLocation: path.join(__dirname, '.eslintcache/', target === 'webworker' ? 'browser/' : ''),
-					cacheStrategy: 'content',
-					fix: mode !== 'production',
-					overrideConfigFile: path.join(
-						__dirname,
-						target === 'webworker' ? '.eslintrc.browser.json' : '.eslintrc.json',
-					),
-				},
-			},
 			formatter: 'basic',
 			typescript: {
 				configFile: path.join(__dirname, target === 'webworker' ? 'tsconfig.browser.json' : 'tsconfig.json'),
 			},
 		}),
 	];
+
+	if (!env.skipLint) {
+		plugins.push(
+			new ESLintLitePlugin({
+				files: path.join(__dirname, 'src', '**', '*.ts'),
+				worker: true,
+				eslintOptions: {
+					cache: true,
+					cacheLocation: path.join(__dirname, '.eslintcache/', target === 'webworker' ? 'browser/' : ''),
+					cacheStrategy: 'content',
+					overrideConfigFile: path.join(
+						__dirname,
+						target === 'webworker' ? '.eslintrc.browser.json' : '.eslintrc.json',
+					),
+				},
+			}),
+		);
+	}
 
 	if (target === 'webworker') {
 		plugins.push(new optimize.LimitChunkCountPlugin({ maxChunks: 1 }));
@@ -94,12 +97,15 @@ function getExtensionConfig(target, mode, env) {
 		plugins.push(
 			new FantasticonPlugin({
 				configPath: '.fantasticonrc.js',
-				onBefore: () =>
-					spawnSync('yarn', ['run', 'icons:svgo'], {
-						cwd: __dirname,
-						encoding: 'utf8',
-						shell: true,
-					}),
+				onBefore:
+					mode !== 'production'
+						? undefined
+						: () =>
+								spawnSync('yarn', ['run', 'icons:svgo'], {
+									cwd: __dirname,
+									encoding: 'utf8',
+									shell: true,
+								}),
 				onComplete: () =>
 					spawnSync('yarn', ['run', 'icons:apply'], {
 						cwd: __dirname,
@@ -152,43 +158,38 @@ function getExtensionConfig(target, mode, env) {
 		target: target,
 		devtool: mode === 'production' ? false : 'source-map',
 		output: {
-			chunkFilename: 'feature-[name].js',
+			chunkFilename: '[name].js',
 			filename: 'gitlens.js',
 			libraryTarget: 'commonjs2',
 			path: target === 'webworker' ? path.join(__dirname, 'dist', 'browser') : path.join(__dirname, 'dist'),
 		},
 		optimization: {
 			minimizer: [
-				env.esbuildMinify
-					? new EsbuildPlugin({
-							drop: ['debugger'],
-							format: 'cjs',
+				new TerserPlugin({
+					minify: TerserPlugin.swcMinify,
+					extractComments: false,
+					parallel: true,
+					terserOptions: {
+						compress: {
+							drop_debugger: true,
+							ecma: 2020,
 							// Keep the class names otherwise @log won't provide a useful name
-							keepNames: true,
-							legalComments: 'none',
-							minify: true,
-							target: 'es2022',
-							treeShaking: true,
-					  })
-					: new TerserPlugin({
-							extractComments: false,
-							parallel: true,
-							terserOptions: {
-								compress: {
-									drop_debugger: true,
-									ecma: 2020,
-									module: true,
-								},
-								ecma: 2020,
-								format: {
-									comments: false,
-									ecma: 2020,
-								},
-								// Keep the class names otherwise @log won't provide a useful name
-								keep_classnames: true,
-								module: true,
-							},
-					  }),
+							keep_classnames: true,
+							module: true,
+						},
+						ecma: 2020,
+						format: {
+							comments: false,
+							ecma: 2020,
+						},
+						// Keep the class names otherwise @log won't provide a useful name
+						keep_classnames: true,
+						mangle: {
+							keep_classnames: true,
+						},
+						module: true,
+					},
+				}),
 			],
 			splitChunks:
 				target === 'webworker'
@@ -217,7 +218,7 @@ function getExtensionConfig(target, mode, env) {
 								options: {
 									format: 'esm',
 									implementation: esbuild,
-									target: ['es2022', 'chrome102', 'node16.14.2'],
+									target: ['es2022', 'chrome114', 'node18.15.0'],
 									tsconfig: path.join(
 										__dirname,
 										target === 'webworker' ? 'tsconfig.browser.json' : 'tsconfig.json',
@@ -278,7 +279,7 @@ function getExtensionConfig(target, mode, env) {
 
 /**
  * @param { 'production' | 'development' | 'none' } mode
- * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; esbuildMinify?: boolean; useSharpForImageOptimization?: boolean }} env
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; skipLint?: boolean }} env
  * @returns { WebpackConfig }
  */
 function getWebviewsConfig(mode, env) {
@@ -302,16 +303,6 @@ function getWebviewsConfig(mode, env) {
 		}),
 		new ForkTsCheckerPlugin({
 			async: false,
-			eslint: {
-				enabled: true,
-				files: path.join(basePath, '**', '*.ts?(x)'),
-				options: {
-					cache: true,
-					cacheLocation: path.join(__dirname, '.eslintcache', 'webviews/'),
-					cacheStrategy: 'content',
-					fix: mode !== 'production',
-				},
-			},
 			formatter: 'basic',
 			typescript: {
 				configFile: path.join(basePath, 'tsconfig.json'),
@@ -330,6 +321,7 @@ function getWebviewsConfig(mode, env) {
 		getHtmlPlugin('welcome', false, mode, env),
 		getHtmlPlugin('focus', true, mode, env),
 		getHtmlPlugin('account', true, mode, env),
+		getHtmlPlugin('patchDetails', true, mode, env),
 		getCspHtmlPlugin(mode, env),
 		new InlineChunkHtmlPlugin(HtmlPlugin, mode === 'production' ? ['\\.css$'] : []),
 		new CopyPlugin({
@@ -352,6 +344,20 @@ function getWebviewsConfig(mode, env) {
 			],
 		}),
 	];
+
+	if (!env.skipLint) {
+		plugins.push(
+			new ESLintLitePlugin({
+				files: path.join(basePath, '**', '*.ts?(x)'),
+				worker: true,
+				eslintOptions: {
+					cache: true,
+					cacheLocation: path.join(__dirname, '.eslintcache', 'webviews/'),
+					cacheStrategy: 'content',
+				},
+			}),
+		);
+	}
 
 	const imageGeneratorConfig = getImageMinimizerConfig(mode, env);
 
@@ -394,12 +400,13 @@ function getWebviewsConfig(mode, env) {
 			welcome: './welcome/welcome.ts',
 			focus: './plus/focus/focus.ts',
 			account: './plus/account/account.ts',
+			patchDetails: './plus/patchDetails/patchDetails.ts',
 		},
 		mode: mode,
 		target: 'web',
 		devtool: mode === 'production' ? false : 'source-map',
 		output: {
-			chunkFilename: 'feature-[name].js',
+			chunkFilename: '[name].js',
 			filename: '[name].js',
 			libraryTarget: 'module',
 			path: path.join(__dirname, 'dist', 'webviews'),
@@ -412,38 +419,33 @@ function getWebviewsConfig(mode, env) {
 			minimizer:
 				mode === 'production'
 					? [
-							env.esbuildMinify
-								? new EsbuildPlugin({
-										css: true,
-										drop: ['debugger', 'console'],
-										format: 'esm',
+							new TerserPlugin({
+								// Terser seems better than SWC for minifying the webviews (esm?)
+								// minify: TerserPlugin.swcMinify,
+								extractComments: false,
+								parallel: true,
+								terserOptions: {
+									compress: {
+										drop_debugger: true,
+										drop_console: true,
+										ecma: 2020,
 										// Keep the class names otherwise @log won't provide a useful name
-										// keepNames: true,
-										legalComments: 'none',
-										minify: true,
-										target: 'es2022',
-										treeShaking: true,
-								  })
-								: new TerserPlugin({
-										extractComments: false,
-										parallel: true,
-										terserOptions: {
-											compress: {
-												drop_debugger: true,
-												drop_console: true,
-												ecma: 2020,
-												module: true,
-											},
-											ecma: 2020,
-											format: {
-												comments: false,
-												ecma: 2020,
-											},
-											// // Keep the class names otherwise @log won't provide a useful name
-											// keep_classnames: true,
-											module: true,
-										},
-								  }),
+										keep_classnames: true,
+										module: true,
+									},
+									ecma: 2020,
+									format: {
+										comments: false,
+										ecma: 2020,
+									},
+									// Keep the class names otherwise @log won't provide a useful name
+									keep_classnames: true,
+									mangle: {
+										keep_classnames: true,
+									},
+									module: true,
+								},
+							}),
 							new ImageMinimizerPlugin({
 								deleteOriginalAssets: true,
 								generator: [imageGeneratorConfig],
@@ -453,6 +455,7 @@ function getWebviewsConfig(mode, env) {
 									preset: [
 										'cssnano-preset-advanced',
 										{
+											autoprefixer: false,
 											discardUnused: false,
 											mergeIdents: false,
 											reduceIdents: false,
@@ -488,7 +491,7 @@ function getWebviewsConfig(mode, env) {
 								options: {
 									format: 'esm',
 									implementation: esbuild,
-									target: 'es2021',
+									target: ['es2021', 'chrome114'],
 									tsconfig: path.join(basePath, 'tsconfig.json'),
 								},
 						  }
@@ -567,7 +570,7 @@ function getWebviewsConfig(mode, env) {
 
 /**
  * @param { 'production' | 'development' | 'none' } mode
- * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; useSharpForImageOptimization?: boolean } | undefined } env
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean } | undefined } env
  * @returns { CspHtmlPlugin }
  */
 function getCspHtmlPlugin(mode, env) {
@@ -607,48 +610,30 @@ function getCspHtmlPlugin(mode, env) {
 
 /**
  * @param { 'production' | 'development' | 'none' } mode
- * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; useSharpForImageOptimization?: boolean } | undefined } env
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean } | undefined } env
  * @returns { ImageMinimizerPlugin.Generator<any> }
  */
 function getImageMinimizerConfig(mode, env) {
 	/** @type ImageMinimizerPlugin.Generator<any> */
 	// @ts-ignore
-	return env.useSharpForImageOptimization
-		? {
-				type: 'asset',
-				implementation: ImageMinimizerPlugin.sharpGenerate,
-				options: {
-					encodeOptions: {
-						webp: {
-							lossless: true,
-						},
-					},
+	return {
+		type: 'asset',
+		implementation: ImageMinimizerPlugin.sharpGenerate,
+		options: {
+			encodeOptions: {
+				webp: {
+					lossless: true,
 				},
-		  }
-		: {
-				type: 'asset',
-				implementation: ImageMinimizerPlugin.imageminGenerate,
-				options: {
-					plugins: [
-						[
-							'imagemin-webp',
-							{
-								lossless: true,
-								nearLossless: 0,
-								quality: 100,
-								method: mode === 'production' ? 4 : 0,
-							},
-						],
-					],
-				},
-		  };
+			},
+		},
+	};
 }
 
 /**
  * @param { string } name
  * @param { boolean } plus
  * @param { 'production' | 'development' | 'none' } mode
- * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean; useSharpForImageOptimization?: boolean } | undefined } env
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; esbuild?: boolean } | undefined } env
  * @returns { HtmlPlugin }
  */
 function getHtmlPlugin(name, plus, mode, env) {
@@ -783,7 +768,7 @@ class FantasticonPlugin {
 			return;
 		}
 
-		const fontConfig = { ...(loadedConfig ?? {}), ...(config ?? {}) };
+		const fontConfig = { ...loadedConfig, ...config };
 
 		// TODO@eamodio: Figure out how to add watching for the fontConfig.inputDir
 		// Maybe something like: https://github.com/Fridus/webpack-watch-files-plugin
@@ -799,14 +784,40 @@ class FantasticonPlugin {
 			}
 
 			const logger = compiler.getInfrastructureLogger(this.pluginName);
-			logger.log(`Generating icon font...`);
-			await onBefore?.(fontConfig);
+			logger.log(`Generating '${compiler.name}' icon font...`);
+
+			const start = Date.now();
+
+			let onBeforeDuration = 0;
+			if (onBefore != null) {
+				const start = Date.now();
+				await onBefore(fontConfig);
+				onBeforeDuration = Date.now() - start;
+			}
+
 			await generateFonts(fontConfig);
-			await onComplete?.(fontConfig);
-			logger.log(`Generated icon font`);
+
+			let onCompleteDuration = 0;
+			if (onComplete != null) {
+				const start = Date.now();
+				await onComplete(fontConfig);
+				onCompleteDuration = Date.now() - start;
+			}
+
+			let suffix = '';
+			if (onBeforeDuration > 0 || onCompleteDuration > 0) {
+				suffix = ` (${onBeforeDuration > 0 ? `onBefore: ${onBeforeDuration}ms` : ''}${
+					onCompleteDuration > 0
+						? `${onBeforeDuration > 0 ? ', ' : ''}onComplete: ${onCompleteDuration}ms`
+						: ''
+				})`;
+			}
+
+			logger.log(`Generated '${compiler.name}' icon font in \x1b[32m${Date.now() - start}ms\x1b[0m${suffix}`);
 		}
 
-		compiler.hooks.beforeRun.tapPromise(this.pluginName, generate.bind(this));
-		compiler.hooks.watchRun.tapPromise(this.pluginName, generate.bind(this));
+		const generateFn = generate.bind(this);
+		compiler.hooks.beforeRun.tapPromise(this.pluginName, generateFn);
+		compiler.hooks.watchRun.tapPromise(this.pluginName, generateFn);
 	}
 }

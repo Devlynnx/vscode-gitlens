@@ -1,44 +1,41 @@
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GitUri } from '../../git/gitUri';
 import type { GitLog } from '../../git/models/log';
-import { PullRequest } from '../../git/models/pullRequest';
-import { pauseOnCancelOrTimeoutMapTuple } from '../../system/cancellation';
-import { gate } from '../../system/decorators/gate';
-import { debug } from '../../system/decorators/log';
-import { getSettledValue } from '../../system/promise';
+import { isPullRequest } from '../../git/models/pullRequest';
+import { getSettledValue, pauseOnCancelOrTimeoutMapTuple } from '../../system/promise';
 import type { ViewsWithCommits } from '../viewBase';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
+import type { PageableViewNode, ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { AutolinkedItemNode } from './autolinkedItemNode';
 import { LoadMoreNode, MessageNode } from './common';
 import { PullRequestNode } from './pullRequestNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
 let instanceId = 0;
 
-export class AutolinkedItemsNode extends ViewNode<ViewsWithCommits> {
+export class AutolinkedItemsNode extends CacheableChildrenViewNode<'autolinks', ViewsWithCommits> {
 	private _instanceId: number;
 
 	constructor(
 		view: ViewsWithCommits,
-		protected override readonly parent: ViewNode,
+		protected override readonly parent: PageableViewNode,
 		public readonly repoPath: string,
 		public readonly log: GitLog,
 		private expand: boolean,
 	) {
-		super(GitUri.fromRepoPath(repoPath), view, parent);
+		super('autolinks', GitUri.fromRepoPath(repoPath), view, parent);
 
 		this._instanceId = instanceId++;
 		this.updateContext({ autolinksId: String(this._instanceId) });
-		this._uniqueId = getViewNodeId('autolinks', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
 		return this._uniqueId;
 	}
 
-	private _children: ViewNode[] | undefined;
-
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children == null) {
+		if (this.children == null) {
 			const commits = [...this.log.commits.values()];
 
 			let children: ViewNode[] | undefined;
@@ -66,7 +63,7 @@ export class AutolinkedItemsNode extends ViewNode<ViewsWithCommits> {
 
 				if (enrichedAutolinks?.size) {
 					children = [...enrichedAutolinks.values()].map(([issueOrPullRequest, autolink]) =>
-						issueOrPullRequest != null && PullRequest.is(issueOrPullRequest?.value)
+						issueOrPullRequest != null && isPullRequest(issueOrPullRequest?.value)
 							? new PullRequestNode(this.view, this, issueOrPullRequest.value, this.log.repoPath)
 							: new AutolinkedItemNode(
 									this.view,
@@ -85,16 +82,16 @@ export class AutolinkedItemsNode extends ViewNode<ViewsWithCommits> {
 
 			if (this.log.hasMore) {
 				children.push(
-					new LoadMoreNode(this.view, this.parent as any, children[children.length - 1], {
+					new LoadMoreNode(this.view, this.parent, children[children.length - 1], {
 						context: { expandAutolinks: true },
 						message: 'Load more commits to search for autolinks',
 					}),
 				);
 			}
 
-			this._children = children;
+			this.children = children;
 		}
-		return this._children;
+		return this.children;
 	}
 
 	getTreeItem(): TreeItem {
@@ -106,13 +103,5 @@ export class AutolinkedItemsNode extends ViewNode<ViewsWithCommits> {
 		item.contextValue = ContextValues.AutolinkedItems;
 
 		return item;
-	}
-
-	@gate()
-	@debug()
-	override refresh(reset: boolean = false) {
-		if (!reset) return;
-
-		this._children = undefined;
 	}
 }

@@ -10,6 +10,10 @@ import { GlyphChars } from '../../../constants';
 import type { GitCommandOptions, GitSpawnOptions } from '../../../git/commandOptions';
 import { GitErrorHandling } from '../../../git/commandOptions';
 import {
+	BlameIgnoreRevsFileBadRevisionError,
+	BlameIgnoreRevsFileError,
+	CherryPickError,
+	CherryPickErrorReason,
 	FetchError,
 	FetchErrorReason,
 	PullError,
@@ -20,14 +24,15 @@ import {
 	StashPushErrorReason,
 	WorkspaceUntrustedError,
 } from '../../../git/errors';
+import type { GitDir } from '../../../git/gitProvider';
 import type { GitDiffFilter } from '../../../git/models/diff';
 import { isUncommitted, isUncommittedStaged, shortenRevision } from '../../../git/models/reference';
 import type { GitUser } from '../../../git/models/user';
-import { GitBranchParser } from '../../../git/parsers/branchParser';
-import { GitLogParser } from '../../../git/parsers/logParser';
-import { GitReflogParser } from '../../../git/parsers/reflogParser';
+import { parseGitBranchesDefaultFormat } from '../../../git/parsers/branchParser';
+import { parseGitLogAllFormat, parseGitLogDefaultFormat } from '../../../git/parsers/logParser';
+import { parseGitRefLogDefaultFormat } from '../../../git/parsers/reflogParser';
 import { parseGitRemoteUrl } from '../../../git/parsers/remoteParser';
-import { GitTagParser } from '../../../git/parsers/tagParser';
+import { parseGitTagsDefaultFormat } from '../../../git/parsers/tagParser';
 import { splitAt } from '../../../system/array';
 import { configuration } from '../../../system/configuration';
 import { log } from '../../../system/decorators/log';
@@ -46,7 +51,6 @@ import { fsExists, isWindows, run, RunError } from './shell';
 
 const emptyArray = Object.freeze([]) as unknown as any[];
 const emptyObj = Object.freeze({});
-const emptyStr = '';
 
 const gitBranchDefaultConfigs = Object.freeze(['-c', 'color.branch=false']);
 const gitDiffDefaultConfigs = Object.freeze(['-c', 'color.diff=false']);
@@ -72,10 +76,13 @@ export const GitErrors = {
 	changesWouldBeOverwritten: /Your local changes to the following files would be overwritten/i,
 	commitChangesFirst: /Please, commit your changes before you can/i,
 	conflict: /^CONFLICT \([^)]+\): \b/m,
+	invalidObjectName: /invalid object name: (.*)\s/i,
+	invalidObjectNameList: /could not open object name list: (.*)\s/i,
 	noFastForward: /\(non-fast-forward\)/i,
 	noMergeBase: /no merge base/i,
 	noRemoteRepositorySpecified: /No remote repository specified\./i,
 	notAValidObjectName: /Not a valid object name/i,
+	notAWorkingTree: /'(.*?)' is not a working tree/i,
 	noUserNameConfigured: /Please tell me who you are\./i,
 	invalidLineCount: /file .+? has only \d+ lines/i,
 	uncommittedChanges: /contains modified or untracked files/i,
@@ -140,7 +147,16 @@ function defaultExceptionHandler(ex: Error, cwd: string | undefined, start?: [nu
 	throw ex;
 }
 
+let _uniqueCounterForStdin = 0;
+function getStdinUniqueKey(): number {
+	if (_uniqueCounterForStdin === Number.MAX_SAFE_INTEGER) {
+		_uniqueCounterForStdin = 0;
+	}
+	return _uniqueCounterForStdin++;
+}
+
 type ExitCodeOnlyGitCommandOptions = GitCommandOptions & { exitCodeOnly: true };
+export type PushForceOptions = { withLease: true; ifIncludes?: boolean } | { withLease: false; ifIncludes?: never };
 
 export class Git {
 	/** Map of running git commands -- avoids running duplicate overlaping commands */
@@ -172,7 +188,9 @@ export class Git {
 
 		const gitCommand = `[${runOpts.cwd}] git ${args.join(' ')}`;
 
-		const command = `${correlationKey !== undefined ? `${correlationKey}:` : ''}${gitCommand}`;
+		const command = `${correlationKey !== undefined ? `${correlationKey}:` : ''}${
+			options?.stdin != null ? `${getStdinUniqueKey()}:` : ''
+		}${gitCommand}`;
 
 		let waiting;
 		let promise = this.pendingCommands.get(command);
@@ -223,32 +241,7 @@ export class Git {
 			}
 		} finally {
 			this.pendingCommands.delete(command);
-
-			const duration = getDurationMilliseconds(start);
-			const slow = duration > slowCallWarningThreshold;
-			const status =
-				slow || waiting
-					? ` (${slow ? `slow${waiting ? ', waiting' : ''}` : ''}${waiting ? 'waiting' : ''})`
-					: '';
-
-			if (exception != null) {
-				Logger.error(
-					'',
-					`[GIT  ] ${gitCommand} ${GlyphChars.Dot} ${(exception.message || String(exception) || '')
-						.trim()
-						.replace(/fatal: /g, '')
-						.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} [${duration}ms]${status}`,
-				);
-			} else if (slow) {
-				Logger.warn(`[GIT  ] ${gitCommand} [*${duration}ms]${status}`);
-			} else {
-				Logger.log(`[GIT  ] ${gitCommand} [${duration}ms]${status}`);
-			}
-			this.logGitCommand(
-				`${gitCommand}${exception != null ? ` ${GlyphChars.Dot} FAILED` : ''}${waiting ? ' (waited)' : ''}`,
-				duration,
-				exception,
-			);
+			this.logGitCommand(gitCommand, exception, getDurationMilliseconds(start), waiting);
 		}
 	}
 
@@ -275,7 +268,7 @@ export class Git {
 			},
 		};
 
-		const gitCommand = `[${spawnOpts.cwd as string}] git ${args.join(' ')}`;
+		const gitCommand = `(spawn) [${spawnOpts.cwd as string}] git ${args.join(' ')}`;
 
 		// Fixes https://github.com/gitkraken/vscode-gitlens/issues/73 & https://github.com/gitkraken/vscode-gitlens/issues/161
 		// See https://stackoverflow.com/questions/4144417/how-to-handle-asian-characters-in-file-names-in-git-on-os-x
@@ -292,9 +285,9 @@ export class Git {
 		}
 
 		if (cancellation) {
-			const controller = new AbortController();
-			spawnOpts.signal = controller.signal;
-			cancellation.onCancellationRequested(() => controller.abort());
+			const aborter = new AbortController();
+			spawnOpts.signal = aborter.signal;
+			cancellation.onCancellationRequested(() => aborter.abort());
 		}
 
 		const proc = spawn(await this.path(), args, spawnOpts);
@@ -304,30 +297,7 @@ export class Git {
 
 		let exception: Error | undefined;
 		proc.once('error', e => (exception = e));
-		proc.once('exit', () => {
-			const duration = getDurationMilliseconds(start);
-			const slow = duration > slowCallWarningThreshold;
-			const status = slow ? ' (slow)' : '';
-
-			if (exception != null) {
-				Logger.error(
-					'',
-					`[SGIT ] ${gitCommand} ${GlyphChars.Dot} ${(exception.message || String(exception) || '')
-						.trim()
-						.replace(/fatal: /g, '')
-						.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} [${duration}ms]${status}`,
-				);
-			} else if (slow) {
-				Logger.warn(`[SGIT ] ${gitCommand} [*${duration}ms]${status}`);
-			} else {
-				Logger.log(`[SGIT ] ${gitCommand} [${duration}ms]${status}`);
-			}
-			this.logGitCommand(
-				`${gitCommand}${exception != null ? ` ${GlyphChars.Dot} FAILED` : ''}`,
-				duration,
-				exception,
-			);
-		});
+		proc.once('exit', () => this.logGitCommand(gitCommand, exception, getDurationMilliseconds(start), false));
 		return proc;
 	}
 
@@ -388,25 +358,68 @@ export class Git {
 		return this.git<string>({ cwd: repoPath, stdin: patch }, ...params);
 	}
 
+	async apply2(
+		repoPath: string,
+		options?: {
+			cancellation?: CancellationToken;
+			configs?: readonly string[];
+			errors?: GitErrorHandling;
+			env?: Record<string, unknown>;
+			stdin?: string;
+		},
+		...args: string[]
+	) {
+		return this.git<string>(
+			{
+				cwd: repoPath,
+				cancellation: options?.cancellation,
+				configs: options?.configs ?? gitLogDefaultConfigs,
+				env: options?.env,
+				errors: options?.errors,
+				stdin: options?.stdin,
+			},
+			'apply',
+			...args,
+			...(options?.stdin ? ['-'] : emptyArray),
+		);
+	}
+
 	private readonly ignoreRevsFileMap = new Map<string, boolean>();
 
 	async blame(
 		repoPath: string | undefined,
 		fileName: string,
-		ref?: string,
-		options: { args?: string[] | null; ignoreWhitespace?: boolean; startLine?: number; endLine?: number } = {},
+		options?: ({ ref: string | undefined; contents?: never } | { contents: string; ref?: never }) & {
+			args?: string[] | null;
+			correlationKey?: string;
+			ignoreWhitespace?: boolean;
+			startLine?: number;
+			endLine?: number;
+		},
 	) {
 		const [file, root] = splitPath(fileName, repoPath, true);
 
 		const params = ['blame', '--root', '--incremental'];
 
-		if (options.ignoreWhitespace) {
+		if (options?.ignoreWhitespace) {
 			params.push('-w');
 		}
-		if (options.startLine != null && options.endLine != null) {
+		if (options?.startLine != null && options.endLine != null) {
 			params.push(`-L ${options.startLine},${options.endLine}`);
 		}
-		if (options.args != null) {
+		if (options?.args != null) {
+			// See if the args contains a value like: `--ignore-revs-file <file>` or `--ignore-revs-file=<file>` to account for user error
+			// If so split it up into two args
+			const argIndex = options.args.findIndex(
+				arg => arg !== '--ignore-revs-file' && arg.startsWith('--ignore-revs-file'),
+			);
+			if (argIndex !== -1) {
+				const match = /^--ignore-revs-file\s*=?\s*(.*)$/.exec(options.args[argIndex]);
+				if (match != null) {
+					options.args.splice(argIndex, 1, '--ignore-revs-file', match[1]);
+				}
+			}
+
 			params.push(...options.args);
 		}
 
@@ -451,80 +464,88 @@ export class Git {
 		}
 
 		let stdin;
-		if (ref) {
-			if (isUncommittedStaged(ref)) {
+		if (options?.contents != null) {
+			// Pipe the blame contents to stdin
+			params.push('--contents', '-');
+
+			stdin = options.contents;
+		} else if (options?.ref) {
+			if (isUncommittedStaged(options.ref)) {
 				// Pipe the blame contents to stdin
 				params.push('--contents', '-');
 
 				// Get the file contents for the staged version using `:`
 				stdin = await this.show<string>(repoPath, fileName, ':');
 			} else {
-				params.push(ref);
+				params.push(options.ref);
 			}
 		}
 
-		return this.git<string>({ cwd: root, stdin: stdin }, ...params, '--', file);
+		try {
+			const blame = await this.git<string>(
+				{ cwd: root, stdin: stdin, correlationKey: options?.correlationKey },
+				...params,
+				'--',
+				file,
+			);
+			return blame;
+		} catch (ex) {
+			// Since `-c blame.ignoreRevsFile=` doesn't seem to work (unlike as the docs suggest), try to detect the error and throw a more helpful one
+			let match = GitErrors.invalidObjectNameList.exec(ex.message);
+			if (match != null) {
+				throw new BlameIgnoreRevsFileError(match[1], ex);
+			}
+
+			match = GitErrors.invalidObjectName.exec(ex.message);
+			if (match != null) {
+				throw new BlameIgnoreRevsFileBadRevisionError(match[1], ex);
+			}
+
+			throw ex;
+		}
 	}
 
-	blame__contents(
-		repoPath: string | undefined,
-		fileName: string,
-		contents: string,
-		options: {
-			args?: string[] | null;
-			correlationKey?: string;
-			ignoreWhitespace?: boolean;
-			startLine?: number;
-			endLine?: number;
-		} = {},
-	) {
-		const [file, root] = splitPath(fileName, repoPath, true);
-
-		const params = ['blame', '--root', '--incremental'];
-
-		if (options.ignoreWhitespace) {
-			params.push('-w');
-		}
-		if (options.startLine != null && options.endLine != null) {
-			params.push(`-L ${options.startLine},${options.endLine}`);
-		}
-		if (options.args != null) {
-			params.push(...options.args);
-		}
-
-		// Pipe the blame contents to stdin
-		params.push('--contents', '-');
-
-		return this.git<string>(
-			{ cwd: root, stdin: contents, correlationKey: options.correlationKey },
-			...params,
-			'--',
-			file,
-		);
+	branch__set_upstream(repoPath: string, branch: string, remote: string, remoteBranch: string) {
+		return this.git<string>({ cwd: repoPath }, 'branch', '--set-upstream-to', `${remote}/${remoteBranch}`, branch);
 	}
 
-	branch__containsOrPointsAt(
+	branchOrTag__containsOrPointsAt(
 		repoPath: string,
-		ref: string,
-		{
-			mode = 'contains',
-			name = undefined,
-			remotes = false,
-		}: { mode?: 'contains' | 'pointsAt'; name?: string; remotes?: boolean } = {},
+		refs: string[],
+		options?: {
+			type?: 'branch' | 'tag';
+			all?: boolean;
+			mode?: 'contains' | 'pointsAt';
+			name?: string;
+			remotes?: boolean;
+		},
 	) {
-		const params = ['branch'];
-		if (remotes) {
+		const params: string[] = [options?.type ?? 'branch'];
+		if (options?.all) {
+			params.push('-a');
+		} else if (options?.remotes) {
 			params.push('-r');
 		}
-		params.push(mode === 'pointsAt' ? `--points-at=${ref}` : `--contains=${ref}`, '--format=%(refname:short)');
-		if (name != null) {
-			params.push(name);
+
+		params.push('--format=%(refname:short)');
+
+		for (const ref of refs) {
+			params.push(options?.mode === 'pointsAt' ? `--points-at=${ref}` : `--contains=${ref}`);
+		}
+
+		if (options?.name != null) {
+			params.push(options.name);
 		}
 
 		return this.git<string>(
 			{ cwd: repoPath, configs: gitBranchDefaultConfigs, errors: GitErrorHandling.Ignore },
 			...params,
 		);
+	}
+
+	async cat_file__size(repoPath: string, oid: string): Promise<number> {
+		const data = await this.git<string>({ cwd: repoPath }, 'cat-file', '-s', oid);
+		return data.length ? parseInt(data.trim(), 10) : 0;
 	}
 
 	check_ignore(repoPath: string, ...files: string[]) {
@@ -575,6 +596,31 @@ export class Git {
 		}
 
 		return this.git<string>({ cwd: repoPath }, ...params);
+	}
+
+	async cherrypick(repoPath: string, sha: string, options: { noCommit?: boolean; errors?: GitErrorHandling } = {}) {
+		const params = ['cherry-pick'];
+		if (options?.noCommit) {
+			params.push('-n');
+		}
+		params.push(sha);
+
+		try {
+			await this.git<string>({ cwd: repoPath, errors: options?.errors }, ...params);
+		} catch (ex) {
+			const msg: string = ex?.toString() ?? '';
+			let reason: CherryPickErrorReason = CherryPickErrorReason.Other;
+			if (
+				GitErrors.changesWouldBeOverwritten.test(msg) ||
+				GitErrors.changesWouldBeOverwritten.test(ex.stderr ?? '')
+			) {
+				reason = CherryPickErrorReason.AbortedWouldOverwrite;
+			} else if (GitErrors.conflict.test(msg) || GitErrors.conflict.test(ex.stdout ?? '')) {
+				reason = CherryPickErrorReason.Conflicts;
+			}
+
+			throw new CherryPickError(reason, ex, sha);
+		}
 	}
 
 	// TODO: Expand to include options and other params
@@ -680,7 +726,7 @@ export class Git {
 				const [, ref] = match;
 
 				// If the bad ref is trying to find a parent ref, assume we hit to the last commit, so try again using the root sha
-				if (ref === ref1 && ref != null && ref.endsWith('^')) {
+				if (ref === ref1 && ref?.endsWith('^')) {
 					return this.diff(repoPath, fileName, rootSha, ref2, options);
 				}
 			}
@@ -765,7 +811,7 @@ export class Git {
 				const [, matchedRef] = match;
 
 				// If the bad ref is trying to find a parent ref, assume we hit to the last commit, so try again using the root sha
-				if (matchedRef === ref && matchedRef != null && matchedRef.endsWith('^')) {
+				if (matchedRef === ref && matchedRef?.endsWith('^')) {
 					return this.diff__contents(repoPath, fileName, rootSha, contents, options);
 				}
 			}
@@ -778,17 +824,17 @@ export class Git {
 		repoPath: string,
 		ref1?: string,
 		ref2?: string,
-		{ filters, similarityThreshold }: { filters?: GitDiffFilter[]; similarityThreshold?: number | null } = {},
+		options?: { filters?: GitDiffFilter[]; path?: string; similarityThreshold?: number },
 	) {
 		const params = [
 			'diff',
 			'--name-status',
-			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
+			`-M${options?.similarityThreshold == null ? '' : `${options?.similarityThreshold}%`}`,
 			'--no-ext-diff',
 			'-z',
 		];
-		if (filters != null && filters.length !== 0) {
-			params.push(`--diff-filter=${filters.join('')}`);
+		if (options?.filters?.length) {
+			params.push(`--diff-filter=${options.filters.join('')}`);
 		}
 		if (ref1) {
 			params.push(ref1);
@@ -797,7 +843,12 @@ export class Git {
 			params.push(ref2);
 		}
 
-		return this.git<string>({ cwd: repoPath, configs: gitDiffDefaultConfigs }, ...params, '--');
+		params.push('--');
+		if (options?.path) {
+			params.push(options.path);
+		}
+
+		return this.git<string>({ cwd: repoPath, configs: gitDiffDefaultConfigs }, ...params);
 	}
 
 	async diff__shortstat(repoPath: string, ref?: string) {
@@ -900,17 +951,32 @@ export class Git {
 
 	async push(
 		repoPath: string,
-		options: { branch?: string; force?: boolean; publish?: boolean; remote?: string; upstream?: string },
+		options: {
+			branch?: string;
+			force?: PushForceOptions;
+			publish?: boolean;
+			remote?: string;
+			upstream?: string;
+		},
 	): Promise<void> {
 		const params = ['push'];
 
-		if (options.force) {
-			params.push('--force');
+		if (options.force != null) {
+			if (options.force.withLease) {
+				params.push('--force-with-lease');
+				if (options.force.ifIncludes) {
+					if (await this.isAtLeastVersion('2.30.0')) {
+						params.push('--force-if-includes');
+					}
+				}
+			} else {
+				params.push('--force');
+			}
 		}
 
 		if (options.branch && options.remote) {
 			if (options.upstream) {
-				params.push('-u', options.remote, `${options.upstream}:${options.branch}`);
+				params.push('-u', options.remote, `${options.branch}:${options.upstream}`);
 			} else if (options.publish) {
 				params.push('--set-upstream', options.remote, options.branch);
 			} else {
@@ -930,7 +996,20 @@ export class Git {
 			} else if (GitWarnings.tipBehind.test(msg) || GitWarnings.tipBehind.test(ex.stderr ?? '')) {
 				reason = PushErrorReason.TipBehind;
 			} else if (GitErrors.pushRejected.test(msg) || GitErrors.pushRejected.test(ex.stderr ?? '')) {
-				reason = PushErrorReason.PushRejected;
+				if (options?.force?.withLease) {
+					if (/! \[rejected\].*\(stale info\)/m.test(ex.stderr || '')) {
+						reason = PushErrorReason.PushRejectedWithLease;
+					} else if (
+						options.force.ifIncludes &&
+						/! \[rejected\].*\(remote ref updated since checkout\)/m.test(ex.stderr || '')
+					) {
+						reason = PushErrorReason.PushRejectedWithLeaseIfIncludes;
+					} else {
+						reason = PushErrorReason.PushRejected;
+					}
+				} else {
+					reason = PushErrorReason.PushRejected;
+				}
 			} else if (GitErrors.permissionDenied.test(msg) || GitErrors.permissionDenied.test(ex.stderr ?? '')) {
 				reason = PushErrorReason.PermissionDenied;
 			} else if (GitErrors.remoteConnection.test(msg) || GitErrors.remoteConnection.test(ex.stderr ?? '')) {
@@ -945,7 +1024,7 @@ export class Git {
 
 	async pull(
 		repoPath: string,
-		options: { branch?: string; remote?: string; rebase?: boolean; tags?: boolean },
+		options: { branch?: string; remote?: string; upstream?: string; rebase?: boolean; tags?: boolean },
 	): Promise<void> {
 		const params = ['pull'];
 
@@ -959,7 +1038,7 @@ export class Git {
 
 		if (options.remote && options.branch) {
 			params.push(options.remote);
-			params.push(options.branch);
+			params.push(options.upstream ? `${options.upstream}:${options.branch}` : options.branch);
 		}
 
 		try {
@@ -1003,7 +1082,7 @@ export class Git {
 	}
 
 	for_each_ref__branch(repoPath: string, options: { all: boolean } = { all: false }) {
-		const params = ['for-each-ref', `--format=${GitBranchParser.defaultFormat}`, 'refs/heads'];
+		const params = ['for-each-ref', `--format=${parseGitBranchesDefaultFormat}`, 'refs/heads'];
 		if (options.all) {
 			params.push('refs/remotes');
 		}
@@ -1012,85 +1091,6 @@ export class Git {
 	}
 
 	log(
-		repoPath: string,
-		ref: string | undefined,
-		{
-			all,
-			argsOrFormat,
-			authors,
-			limit,
-			merges,
-			ordering,
-			similarityThreshold,
-			since,
-			until,
-		}: {
-			all?: boolean;
-			argsOrFormat?: string | string[];
-			authors?: GitUser[];
-			limit?: number;
-			merges?: boolean;
-			ordering?: 'date' | 'author-date' | 'topo' | null;
-			similarityThreshold?: number | null;
-			since?: number | string;
-			until?: number | string;
-		},
-	) {
-		if (argsOrFormat == null) {
-			argsOrFormat = ['--name-status', `--format=${all ? GitLogParser.allFormat : GitLogParser.defaultFormat}`];
-		}
-
-		if (typeof argsOrFormat === 'string') {
-			argsOrFormat = [`--format=${argsOrFormat}`];
-		}
-
-		const params = [
-			'log',
-			...argsOrFormat,
-			'--full-history',
-			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
-			'-m',
-		];
-
-		if (ordering) {
-			params.push(`--${ordering}-order`);
-		}
-
-		if (limit) {
-			params.push(`-n${limit + 1}`);
-		}
-
-		if (since) {
-			params.push(`--since="${since}"`);
-		}
-
-		if (until) {
-			params.push(`--until="${until}"`);
-		}
-
-		if (!merges) {
-			params.push('--first-parent');
-		}
-
-		if (authors != null && authors.length !== 0) {
-			if (!params.includes('--use-mailmap')) {
-				params.push('--use-mailmap');
-			}
-			params.push(...authors.map(a => `--author=^${a.name} <${a.email}>$`));
-		}
-
-		if (all) {
-			params.push('--all', '--single-worktree');
-		}
-
-		if (ref && !isUncommittedStaged(ref)) {
-			params.push(ref);
-		}
-
-		return this.git<string>({ cwd: repoPath, configs: gitLogDefaultConfigsWithFiles }, ...params, '--');
-	}
-
-	log2(
 		repoPath: string,
 		options?: {
 			cancellation?: CancellationToken;
@@ -1205,8 +1205,8 @@ export class Git {
 			// TODO@eamodio remove this in favor of argsOrFormat
 			fileMode = 'full',
 			filters,
-			firstParent = false,
 			limit,
+			merges = false,
 			ordering,
 			renames = true,
 			reverse = false,
@@ -1220,8 +1220,8 @@ export class Git {
 			// TODO@eamodio remove this in favor of argsOrFormat
 			fileMode?: 'full' | 'simple' | 'none';
 			filters?: GitDiffFilter[];
-			firstParent?: boolean;
 			limit?: number;
+			merges?: boolean;
 			ordering?: 'date' | 'author-date' | 'topo' | null;
 			renames?: boolean;
 			reverse?: boolean;
@@ -1234,7 +1234,7 @@ export class Git {
 		const [file, root] = splitPath(fileName, repoPath, true);
 
 		if (argsOrFormat == null) {
-			argsOrFormat = [`--format=${all ? GitLogParser.allFormat : GitLogParser.defaultFormat}`];
+			argsOrFormat = [`--format=${all ? parseGitLogAllFormat : parseGitLogDefaultFormat}`];
 		}
 
 		if (typeof argsOrFormat === 'string') {
@@ -1263,18 +1263,17 @@ export class Git {
 			params.push('--all', '--single-worktree');
 		}
 
-		// Can't allow rename detection (`--follow`) if `all` or a `startLine` is specified
-		if (renames && (all || startLine != null)) {
+		if (merges) {
+			params.push('--first-parent');
+		}
+
+		// Can't allow rename detection (`--follow`) if a `startLine` is specified
+		if (renames && startLine != null) {
 			renames = false;
 		}
 
-		params.push(renames ? '--follow' : '-m');
-		if (/*renames ||*/ firstParent) {
-			params.push('--first-parent');
-			// In Git >= 2.29.0 `--first-parent` implies `-m`, so lets include it for consistency
-			if (renames) {
-				params.push('-m');
-			}
+		if (renames) {
+			params.push('--follow');
 		}
 
 		if (filters != null && filters.length !== 0) {
@@ -1353,13 +1352,13 @@ export class Git {
 
 	async log__find_object(
 		repoPath: string,
-		objectId: string,
+		oid: string,
 		ref: string,
 		ordering: 'date' | 'author-date' | 'topo' | null,
 		file?: string,
 		cancellation?: CancellationToken,
 	) {
-		const params = ['log', '-n1', '--no-renames', '--format=%H', `--find-object=${objectId}`, ref];
+		const params = ['log', '-n1', '--no-renames', '--format=%H', `--find-object=${oid}`, ref];
 
 		if (ordering) {
 			params.push(`--${ordering}-order`);
@@ -1431,7 +1430,7 @@ export class Git {
 				'show',
 				'--stdin',
 				'--name-status',
-				`--format=${GitLogParser.defaultFormat}`,
+				`--format=${parseGitLogDefaultFormat}`,
 				'--use-mailmap',
 			);
 		}
@@ -1444,7 +1443,7 @@ export class Git {
 			'log',
 			...(options?.stdin ? ['--stdin'] : emptyArray),
 			'--name-status',
-			`--format=${GitLogParser.defaultFormat}`,
+			`--format=${parseGitLogDefaultFormat}`,
 			'--use-mailmap',
 			...search,
 			...(options?.ordering ? [`--${options.ordering}-order`] : emptyArray),
@@ -1465,14 +1464,18 @@ export class Git {
 	async ls_files(
 		repoPath: string,
 		fileName: string,
-		{ ref, untracked }: { ref?: string; untracked?: boolean } = {},
+		options?: { ref?: string; untracked?: boolean },
 	): Promise<string | undefined> {
 		const params = ['ls-files'];
-		if (ref && !isUncommitted(ref)) {
-			params.push(`--with-tree=${ref}`);
+		if (options?.ref) {
+			if (!isUncommitted(options.ref)) {
+				params.push(`--with-tree=${options.ref}`);
+			} else if (isUncommittedStaged(options.ref)) {
+				params.push('--stage');
+			}
 		}
 
-		if (!ref && untracked) {
+		if (!options?.ref && options?.untracked) {
 			params.push('-o');
 		}
 
@@ -1535,7 +1538,7 @@ export class Git {
 			skip?: number;
 		} = {},
 	): Promise<string> {
-		const params = ['log', '--walk-reflogs', `--format=${GitReflogParser.defaultFormat}`, '--date=iso8601'];
+		const params = ['log', '--walk-reflogs', `--format=${parseGitRefLogDefaultFormat}`, '--date=iso8601'];
 
 		if (ordering) {
 			params.push(`--${ordering}-order`);
@@ -1631,12 +1634,17 @@ export class Git {
 	async rev_list__left_right(
 		repoPath: string,
 		refs: string[],
+		authors?: GitUser[] | undefined,
 	): Promise<{ ahead: number; behind: number } | undefined> {
+		const params = ['rev-list', '--left-right', '--count'];
+
+		if (authors?.length) {
+			params.push(...authors.map(a => `--author=^${a.name} <${a.email}>$`));
+		}
+
 		const data = await this.git<string>(
 			{ cwd: repoPath, errors: GitErrorHandling.Ignore },
-			'rev-list',
-			'--left-right',
-			'--count',
+			...params,
 			...refs,
 			'--',
 		);
@@ -2015,34 +2023,47 @@ export class Git {
 		);
 	}
 
+	async stash__create(repoPath: string): Promise<string | undefined> {
+		const params = ['stash', 'create'];
+
+		const data = await this.git<string>({ cwd: repoPath }, ...params);
+		return data?.trim() || undefined;
+	}
+
+	async stash__store(repoPath: string, sha: string, message?: string): Promise<void> {
+		const params = ['stash', 'store'];
+
+		if (message) {
+			params.push('-m', message);
+		}
+
+		params.push(sha);
+
+		await this.git<string>({ cwd: repoPath }, ...params);
+	}
+
 	async stash__push(
 		repoPath: string,
 		message?: string,
-		{
-			includeUntracked,
-			keepIndex,
-			onlyStaged,
-			pathspecs,
-			stdin,
-		}: {
+		options?: {
 			includeUntracked?: boolean;
 			keepIndex?: boolean;
 			onlyStaged?: boolean;
 			pathspecs?: string[];
 			stdin?: boolean;
-		} = {},
+		},
 	): Promise<void> {
 		const params = ['stash', 'push'];
 
-		if (includeUntracked || (pathspecs != null && pathspecs.length !== 0)) {
-			params.push('-u');
+		if ((options?.includeUntracked || options?.pathspecs?.length) && !options?.onlyStaged) {
+			params.push('--include-untracked');
 		}
 
-		if (keepIndex) {
-			params.push('-k');
+		if (options?.keepIndex && !options?.includeUntracked) {
+			params.push('--keep-index');
 		}
 
-		if (onlyStaged) {
+		if (options?.onlyStaged) {
 			if (await this.isAtLeastVersion('2.35')) {
 				params.push('--staged');
 			} else {
@@ -2054,24 +2075,24 @@ export class Git {
 			params.push('-m', message);
 		}
 
-		if (stdin && pathspecs != null && pathspecs.length !== 0) {
-			void (await this.git<string>(
-				{ cwd: repoPath, stdin: pathspecs.join('\0') },
-				...params,
-				'--pathspec-from-file=-',
-				'--pathspec-file-nul',
-			));
-
-			return;
-		}
-
-		params.push('--');
-		if (pathspecs != null && pathspecs.length !== 0) {
-			params.push(...pathspecs);
+		let stdin;
+		if (options?.pathspecs?.length) {
+			if (options.stdin) {
+				stdin = options.pathspecs.join('\0');
+				params.push('--pathspec-from-file=-', '--pathspec-file-nul', '--');
+			} else {
+				params.push('--', ...options.pathspecs);
+			}
+		} else {
+			params.push('--');
 		}
 
 		try {
-			void (await this.git<string>({ cwd: repoPath }, ...params));
+			const data = await this.git<string>({ cwd: repoPath, stdin: stdin }, ...params);
+			if (data.includes('No local changes to save')) {
+				throw new StashPushError(StashPushErrorReason.NothingToSave);
+				return;
+			}
 		} catch (ex) {
 			if (
 				ex instanceof RunError &&
@@ -2087,7 +2108,7 @@ export class Git {
 	async status(
 		repoPath: string,
 		porcelainVersion: number = 1,
-		{ similarityThreshold }: { similarityThreshold?: number | null } = {},
+		options?: { similarityThreshold?: number },
 	): Promise<string> {
 		const params = [
 			'status',
@@ -2096,7 +2117,9 @@ export class Git {
 			'-u',
 		];
 		if (await this.isAtLeastVersion('2.18')) {
-			params.push(`--find-renames${similarityThreshold == null ? '' : `=${similarityThreshold}%`}`);
+			params.push(
+				`--find-renames${options?.similarityThreshold == null ? '' : `=${options.similarityThreshold}%`}`,
+			);
 		}
 
 		return this.git<string>(
@@ -2106,33 +2129,12 @@ export class Git {
 		);
 	}
 
-	async status__file(
-		repoPath: string,
-		fileName: string,
-		porcelainVersion: number = 1,
-		{ similarityThreshold }: { similarityThreshold?: number | null } = {},
-	): Promise<string> {
-		const [file, root] = splitPath(fileName, repoPath, true);
-
-		const params = ['status', porcelainVersion >= 2 ? `--porcelain=v${porcelainVersion}` : '--porcelain'];
-		if (await this.isAtLeastVersion('2.18')) {
-			params.push(`--find-renames${similarityThreshold == null ? '' : `=${similarityThreshold}%`}`);
-		}
-
-		return this.git<string>(
-			{ cwd: root, configs: gitStatusDefaultConfigs, env: { GIT_OPTIONAL_LOCKS: '0' } },
-			...params,
-			'--',
-			file,
-		);
-	}
-
 	symbolic_ref(repoPath: string, ref: string) {
 		return this.git<string>({ cwd: repoPath }, 'symbolic-ref', '--short', ref);
 	}
 
 	tag(repoPath: string) {
-		return this.git<string>({ cwd: repoPath }, 'tag', '-l', `--format=${GitTagParser.defaultFormat}`);
+		return this.git<string>({ cwd: repoPath }, 'tag', '-l', `--format=${parseGitTagsDefaultFormat}`);
 	}
 
 	worktree__add(
@@ -2177,22 +2179,22 @@ export class Git {
 	}
 
 	async readDotGitFile(
-		repoPath: string,
-		paths: string[],
+		gitDir: GitDir,
+		pathParts: string[],
 		options?: { numeric?: false; throw?: boolean; trim?: boolean },
 	): Promise<string | undefined>;
 	async readDotGitFile(
-		repoPath: string,
-		path: string[],
+		gitDir: GitDir,
+		pathParts: string[],
 		options?: { numeric: true; throw?: boolean; trim?: boolean },
 	): Promise<number | undefined>;
 	async readDotGitFile(
-		repoPath: string,
+		gitDir: GitDir,
 		pathParts: string[],
 		options?: { numeric?: boolean; throw?: boolean; trim?: boolean },
 	): Promise<string | number | undefined> {
 		try {
-			const bytes = await workspace.fs.readFile(Uri.file(joinPaths(repoPath, '.git', ...pathParts)));
+			const bytes = await workspace.fs.readFile(Uri.joinPath(gitDir.uri, ...pathParts));
 			let contents = textDecoder.decode(bytes);
 			contents = options?.trim ?? true ? contents.trim() : contents;
 
@@ -2234,7 +2236,7 @@ export class Git {
 		}
 
 		Logger.log(scope, `\u2022 '${text}'`);
-		this.logGitCommand(`[TERM] ${text}`, 0);
+		this.logCore(`[TERM] ${text}`);
 
 		const terminal = ensureGitTerminal();
 		terminal.show(false);
@@ -2244,31 +2246,37 @@ export class Git {
 		terminal.sendText(text, options?.execute ?? false);
 	}
 
+	private logGitCommand(command: string, ex: Error | undefined, duration: number, waiting: boolean): void {
+		const slow = duration > slowCallWarningThreshold;
+		const status = slow && waiting ? ' (slow, waiting)' : waiting ? ' (waiting)' : slow ? ' (slow)' : '';
+
+		if (ex != null) {
+			Logger.error(
+				'',
+				`[GIT  ] ${command} ${GlyphChars.Dot} ${(ex.message || String(ex) || '')
+					.trim()
+					.replace(/fatal: /g, '')
+					.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} [${duration}ms]${status}`,
+			);
+		} else if (slow) {
+			Logger.warn(`[GIT  ] ${command} [*${duration}ms]${status}`);
+		} else {
+			Logger.log(`[GIT  ] ${command} [${duration}ms]${status}`);
+		}
+
+		this.logCore(`[${slow ? '*' : ' '}${duration.toString().padStart(6)}ms] ${command}${status}`, ex);
+	}
+
 	private _gitOutput: OutputChannel | undefined;
 
-	private logGitCommand(command: string, duration: number, ex?: Error): void {
-		if (!Logger.enabled('debug') && !Logger.isDebugging) return;
+	private logCore(message: string, ex?: Error | undefined): void {
+		if (!Logger.enabled(ex != null ? 'error' : 'debug')) return;
 
-		const slow = duration > slowCallWarningThreshold;
-
-		if (Logger.isDebugging) {
-			if (ex != null) {
-				console.error(Logger.timestamp, '[GitLens (Git)]', command ?? emptyStr, ex);
-			} else if (slow) {
-				console.warn(Logger.timestamp, '[GitLens (Git)]', command ?? emptyStr);
-			} else {
-				console.log(Logger.timestamp, '[GitLens (Git)]', command ?? emptyStr);
-			}
+		this._gitOutput ??= window.createOutputChannel('GitLens (Git)');
+		this._gitOutput.appendLine(`${Logger.timestamp} ${message}${ex != null ? ` ${GlyphChars.Dot} FAILED` : ''}`);
+		if (ex != null) {
+			this._gitOutput.appendLine(`\n${String(ex)}\n`);
 		}
-
-		if (this._gitOutput == null) {
-			this._gitOutput = window.createOutputChannel('GitLens (Git)');
-		}
-		this._gitOutput.appendLine(
-			`${Logger.timestamp} [${slow ? '*' : ' '}${duration.toString().padStart(6)}ms] ${command}${
-				ex != null ? `\n\n${ex.toString()}` : emptyStr
-			}`,
-		);
 	}
 }
 

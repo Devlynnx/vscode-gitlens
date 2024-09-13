@@ -3,7 +3,7 @@ import type { CommandCallback } from '../system/command';
 import { registerWebviewCommand } from '../system/command';
 import type { WebviewContext } from '../system/webview';
 import { isWebviewContext } from '../system/webview';
-import type { WebviewProvider } from './webviewController';
+import type { WebviewProvider } from './webviewProvider';
 
 export type WebviewCommandCallback<T extends Partial<WebviewContext>> = (arg?: T | undefined) => any;
 export class WebviewCommandRegistrar implements Disposable {
@@ -19,6 +19,7 @@ export class WebviewCommandRegistrar implements Disposable {
 	registerCommand<T extends WebviewProvider<any>>(
 		provider: T,
 		id: string,
+		instanceId: string | undefined,
 		command: string,
 		callback: CommandCallback,
 	) {
@@ -29,20 +30,22 @@ export class WebviewCommandRegistrar implements Disposable {
 				subscription: registerWebviewCommand(
 					command,
 					(...args: any[]) => {
-						const item = args[0];
-						if (!isWebviewContext(item)) {
+						const [context] = args;
+						if (!isWebviewContext(context)) {
 							debugger;
 							return;
 						}
 
-						const handler = handlers.get(item.webview);
+						const key = context.webviewInstance
+							? `${context.webview}:${context.webviewInstance}`
+							: context.webview;
+
+						const handler = handlers.get(key);
 						if (handler == null) {
-							throw new Error(
-								`Unable to find Command '${command}' registration for Webview '${item.webview}'`,
-							);
+							throw new Error(`Unable to find Command '${command}' registration for Webview '${key}'`);
 						}
 
-						handler.callback.call(handler.thisArg, item);
+						handler.callback.call(handler.thisArg, context);
 					},
 					this,
 				),
@@ -51,18 +54,20 @@ export class WebviewCommandRegistrar implements Disposable {
 			this._commandRegistrations.set(command, registration);
 		}
 
-		if (registration.handlers.has(id)) {
-			throw new Error(`Command '${command}' has already been registered for Webview '${id}'`);
+		const key = instanceId ? `${id}:${instanceId}` : id;
+
+		if (registration.handlers.has(key)) {
+			throw new Error(`Command '${command}' has already been registered for Webview '${key}'`);
 		}
 
-		registration.handlers.set(id, { callback: callback, thisArg: provider });
+		registration.handlers.set(key, { callback: callback, thisArg: provider });
 
 		return {
 			dispose: () => {
-				registration!.handlers.delete(id);
-				if (registration!.handlers.size === 0) {
+				registration.handlers.delete(key);
+				if (registration.handlers.size === 0) {
 					this._commandRegistrations.delete(command);
-					registration!.subscription.dispose();
+					registration.subscription.dispose();
 				}
 			},
 		};

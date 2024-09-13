@@ -9,15 +9,13 @@ import type {
 	Uri,
 } from 'vscode';
 import { CodeLens, EventEmitter, Location, Position, Range, SymbolInformation, SymbolKind } from 'vscode';
-import type {
-	DiffWithPreviousCommandArgs,
-	OpenOnRemoteCommandArgs,
-	ShowCommitsInViewCommandArgs,
-	ShowQuickCommitCommandArgs,
-	ShowQuickCommitFileCommandArgs,
-	ShowQuickFileHistoryCommandArgs,
-	ToggleFileChangesAnnotationCommandArgs,
-} from '../commands';
+import type { DiffWithPreviousCommandArgs } from '../commands/diffWithPrevious';
+import type { OpenOnRemoteCommandArgs } from '../commands/openOnRemote';
+import type { ShowCommitsInViewCommandArgs } from '../commands/showCommitsInView';
+import type { ShowQuickCommitCommandArgs } from '../commands/showQuickCommit';
+import type { ShowQuickCommitFileCommandArgs } from '../commands/showQuickCommitFile';
+import type { ShowQuickFileHistoryCommandArgs } from '../commands/showQuickFileHistory';
+import type { ToggleFileChangesAnnotationCommandArgs } from '../commands/toggleFileAnnotations';
 import type { CodeLensConfig, CodeLensLanguageScope } from '../config';
 import { CodeLensCommand } from '../config';
 import { Commands, Schemes } from '../constants';
@@ -93,7 +91,7 @@ export class GitCodeLensProvider implements CodeLensProvider {
 
 	constructor(private readonly container: Container) {}
 
-	reset(_reason?: 'idle' | 'saved') {
+	reset() {
 		this._onDidChangeCodeLenses.fire();
 	}
 
@@ -101,20 +99,13 @@ export class GitCodeLensProvider implements CodeLensProvider {
 		// Since we can't currently blame edited virtual documents, don't even attempt anything if dirty
 		if (document.isDirty && isVirtualUri(document.uri)) return [];
 
-		const trackedDocument = await this.container.tracker.getOrAdd(document);
+		const trackedDocument = await this.container.documentTracker.getOrAdd(document);
 		if (!trackedDocument.isBlameable) return [];
 
 		let dirty = false;
-		if (document.isDirty) {
-			// Only allow dirty blames if we are idle
-			if (trackedDocument.isDirtyIdle) {
-				const maxLines = configuration.get('advanced.blame.sizeThresholdAfterEdit');
-				if (maxLines > 0 && document.lineCount > maxLines) {
-					dirty = true;
-				}
-			} else {
-				dirty = true;
-			}
+		// Only allow dirty blames if we are idle
+		if (document.isDirty && !trackedDocument.isDirtyIdle) {
+			dirty = true;
 		}
 
 		const cfg = configuration.get('codeLens', document);
@@ -460,7 +451,7 @@ export class GitCodeLensProvider implements CodeLensProvider {
 	resolveCodeLens(lens: CodeLens, token: CancellationToken): CodeLens | Promise<CodeLens> {
 		if (lens instanceof GitRecentChangeCodeLens) return this.resolveGitRecentChangeCodeLens(lens, token);
 		if (lens instanceof GitAuthorsCodeLens) return this.resolveGitAuthorsCodeLens(lens, token);
-		// eslint-disable-next-line prefer-promise-reject-errors
+		// eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
 		return Promise.reject<CodeLens>(undefined);
 	}
 
@@ -546,8 +537,11 @@ export class GitCodeLensProvider implements CodeLensProvider {
 
 		const count = blame.authors.size;
 		const author = first(blame.authors.values())?.name ?? 'Unknown';
+		const andOthers = count > 1
+			? ` and ${pluralize('one other', count - 1, { only: true, plural: 'others' })}`
+			: '';
 
-		let title = `${pluralize('author', count, { zero: '?' })} (${author}${count > 1 ? ' and others' : ''})`;
+		let title = `${pluralize('author', count, { zero: '?' })} (${author}${andOthers})`;
 		if (configuration.get('debug')) {
 			title += ` [${lens.languageId}: ${SymbolKind[lens.symbol.kind]}(${lens.range.start.character}-${
 				lens.range.end.character

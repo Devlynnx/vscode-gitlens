@@ -1,10 +1,20 @@
-import { css, html, LitElement, nothing } from 'lit';
+import { css, html, LitElement } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { isSubscriptionStatePaidOrTrial, SubscriptionState } from '../../../../subscription';
+import type { Source } from '../../../../constants';
+import type { SubscriptionState } from '../../../../plus/gk/account/subscription';
+import { isSubscriptionStatePaidOrTrial } from '../../../../plus/gk/account/subscription';
 import '../../plus/shared/components/feature-gate-plus-state';
 
-@customElement('gk-feature-gate')
-export class FeatureGate extends LitElement {
+declare global {
+	interface HTMLElementTagNameMap {
+		'gl-feature-gate': GlFeatureGate;
+	}
+
+	interface GlobalEventHandlersEventMap {}
+}
+
+@customElement('gl-feature-gate')
+export class GlFeatureGate extends LitElement {
 	static override styles = css`
 		:host {
 			--background: var(--vscode-sideBar-background);
@@ -80,8 +90,14 @@ export class FeatureGate extends LitElement {
 		}
 	`;
 
-	@property()
+	@property({ reflect: true })
 	appearance?: 'alert' | 'welcome';
+
+	@property()
+	featureWithArticleIfNeeded?: string;
+
+	@property({ type: Object })
+	source?: Source;
 
 	@property({ attribute: false, type: Number })
 	state?: SubscriptionState;
@@ -103,10 +119,14 @@ export class FeatureGate extends LitElement {
 		this.hidden = false;
 		return html`
 			<section>
-				<slot>
-					<slot name="feature" hidden=${this.state === SubscriptionState.Free ? nothing : ''}></slot>
-				</slot>
-				<gk-feature-gate-plus-state appearance=${appearance} .state=${this.state}></gk-feature-gate-plus-state>
+				<slot></slot>
+				<slot name="feature"></slot>
+				<gl-feature-gate-plus-state
+					appearance=${appearance}
+					.featureWithArticleIfNeeded=${this.featureWithArticleIfNeeded}
+					.source=${this.source}
+					.state=${this.state}
+				></gl-feature-gate-plus-state>
 			</section>
 		`;
 	}

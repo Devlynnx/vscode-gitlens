@@ -1,4 +1,4 @@
-<section id="menus" class="section--settings section--collapsible">
+<section id="menus" class="section--settings section--collapsible" tabindex="-1">
 	<div class="section__header">
 		<div class="setting__input setting__input--big">
 			<input id="menus" name="menus" type="checkbox" value="undefined" data-setting />
@@ -465,6 +465,20 @@
 							<label for="menus.scmRepositoryInline.graph">Add a <i>Show Commit Graph</i> command</label>
 						</div>
 					</div>
+
+					<div class="setting" data-enablement="menus.scmRepositoryInline">
+						<div class="setting__input">
+							<input
+								id="menus.scmRepositoryInline.stash"
+								name="menus.scmRepositoryInline.stash"
+								type="checkbox"
+								data-setting
+								data-setting-type="object"
+								disabled
+							/>
+							<label for="menus.scmRepositoryInline.stash">Add a <i>Stash All Changes</i> command</label>
+						</div>
+					</div>
 				</div>
 
 				<div class="setting setting--expandable" data-enablement="menus">
@@ -509,6 +523,21 @@
 							/>
 							<label for="menus.scmRepository.generateCommitMessage"
 								>Add a <i>Generate Commit Message (Experimental)</i> command</label
+							>
+						</div>
+					</div>
+					<div class="setting" data-enablement="menus.scmRepository">
+						<div class="setting__input">
+							<input
+								id="menus.scmRepository.patch"
+								name="menus.scmRepository.patch"
+								type="checkbox"
+								data-setting
+								data-setting-type="object"
+								disabled
+							/>
+							<label for="menus.scmRepository.patch"
+								>Add <i>Copy as Patch</i> and <i>Share as Cloud Patch...</i> commands</label
 							>
 						</div>
 					</div>
@@ -616,6 +645,22 @@
 							/>
 							<label for="menus.scmGroup.openClose"
 								>Add <i>Open Changed Files</i> and <i>Close Unchanged Files</i> commands</label
+							>
+						</div>
+					</div>
+
+					<div class="setting" data-enablement="menus.scmGroup">
+						<div class="setting__input">
+							<input
+								id="menus.scmGroup.patch"
+								name="menus.scmGroup.patch"
+								type="checkbox"
+								data-setting
+								data-setting-type="object"
+								disabled
+							/>
+							<label for="menus.scmGroup.patch"
+								>Add <i>Copy as Patch</i> and <i>Share as Cloud Patch...</i> commands</label
 							>
 						</div>
 					</div>
@@ -759,12 +804,12 @@
 
 		<div class="section__group">
 			<p class="section__hint">
-				<i class="icon icon__info"></i> For more options, open
+				<i class="icon icon__info"></i> For more options, open the
 				<a
-					class="command"
-					title="Open Settings"
+					class="secondary"
+					title="Open Settings UI"
 					href="command:workbench.action.openSettings?%22gitlens.menus%22"
-					>Settings</a
+					>Settings UI</a
 				>
 				and search for <b><i>gitlens.menus</i></b>
 			</p>

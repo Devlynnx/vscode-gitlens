@@ -4,16 +4,16 @@ import { md5 } from '@env/crypto';
 import { executeGitCommand } from '../../git/actions';
 import { GitUri } from '../../git/gitUri';
 import type { GitLog } from '../../git/models/log';
+import type { CommitsQueryResults } from '../../git/queryResults';
 import type { SearchQuery } from '../../git/search';
 import { getSearchQueryComparisonKey, getStoredSearchQuery } from '../../git/search';
 import { gate } from '../../system/decorators/gate';
 import { debug } from '../../system/decorators/log';
 import { pluralize } from '../../system/string';
 import type { SearchAndCompareView } from '../searchAndCompareView';
-import type { CommitsQueryResults } from './resultsCommitsNode';
+import type { PageableViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 import { ResultsCommitsNode } from './resultsCommitsNode';
-import type { PageableViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
 let instanceId = 0;
 
@@ -24,7 +24,7 @@ interface SearchQueryResults {
 	more?(limit: number | undefined): Promise<void>;
 }
 
-export class SearchResultsNode extends ViewNode<SearchAndCompareView> implements PageableViewNode {
+export class SearchResultsNode extends ViewNode<'search-results', SearchAndCompareView> implements PageableViewNode {
 	private _instanceId: number;
 
 	constructor(
@@ -49,11 +49,11 @@ export class SearchResultsNode extends ViewNode<SearchAndCompareView> implements
 			| undefined,
 		private _storedAt: number = 0,
 	) {
-		super(GitUri.fromRepoPath(repoPath), view, parent);
+		super('search-results', GitUri.fromRepoPath(repoPath), view, parent);
 
 		this._instanceId = instanceId++;
 		this.updateContext({ searchId: `${getSearchQueryComparisonKey(this._search)}+${this._instanceId}` });
-		this._uniqueId = getViewNodeId('search-results', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 
 		// If this is a new search, save it
 		if (this._storedAt === 0) {
@@ -64,6 +64,10 @@ export class SearchResultsNode extends ViewNode<SearchAndCompareView> implements
 
 	override get id(): string {
 		return this._uniqueId;
+	}
+
+	override toClipboard(): string {
+		return this.search.query;
 	}
 
 	get order(): number {

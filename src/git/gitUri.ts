@@ -57,15 +57,21 @@ export class GitUri extends (Uri as any as UriEx) {
 		}
 
 		if (uri.scheme === Schemes.GitLens) {
+			let path = uri.path;
+
+			const metadata = decodeGitLensRevisionUriAuthority<RevisionUriData>(uri.authority);
+			if (metadata.uncPath != null && !path.startsWith(metadata.uncPath)) {
+				path = `${metadata.uncPath}${uri.path}`;
+			}
+
 			super({
 				scheme: uri.scheme,
 				authority: uri.authority,
-				path: uri.path,
+				path: path,
 				query: uri.query,
 				fragment: uri.fragment,
 			});
 
-			const metadata = decodeGitLensRevisionUriAuthority<RevisionUriData>(uri.authority);
 			this.repoPath = metadata.repoPath;
 
 			let ref = metadata.ref;
@@ -73,7 +79,7 @@ export class GitUri extends (Uri as any as UriEx) {
 				ref = commitOrRepoPath.sha;
 			}
 
-			if (isUncommittedStaged(ref) || !isUncommitted(ref)) {
+			if (!isUncommitted(ref) || isUncommittedStaged(ref)) {
 				this.sha = ref;
 			}
 
@@ -93,7 +99,7 @@ export class GitUri extends (Uri as any as UriEx) {
 				ref = commitOrRepoPath.sha;
 			}
 
-			if (ref && (isUncommittedStaged(ref) || !isUncommitted(ref))) {
+			if (ref && (!isUncommitted(ref) || isUncommittedStaged(ref))) {
 				this.sha = ref;
 			}
 
@@ -158,7 +164,7 @@ export class GitUri extends (Uri as any as UriEx) {
 			fragment: uri.fragment,
 		});
 		this.repoPath = commitOrRepoPath.repoPath;
-		if (isUncommittedStaged(commitOrRepoPath.sha) || !isUncommitted(commitOrRepoPath.sha)) {
+		if (!isUncommitted(commitOrRepoPath.sha) || isUncommittedStaged(commitOrRepoPath.sha)) {
 			this.sha = commitOrRepoPath.sha;
 		}
 	}

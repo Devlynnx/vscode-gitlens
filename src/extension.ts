@@ -4,7 +4,8 @@ import { hrtime } from '@env/hrtime';
 import { isWeb } from '@env/platform';
 import { Api } from './api/api';
 import type { CreatePullRequestActionContext, GitLensApi, OpenPullRequestActionContext } from './api/gitlens';
-import type { CreatePullRequestOnRemoteCommandArgs, OpenPullRequestOnRemoteCommandArgs } from './commands';
+import type { CreatePullRequestOnRemoteCommandArgs } from './commands/createPullRequestOnRemote';
+import type { OpenPullRequestOnRemoteCommandArgs } from './commands/openPullRequestOnRemote';
 import { fromOutputLevel } from './config';
 import { Commands, SyncedStorageKeys } from './constants';
 import { Container } from './container';
@@ -20,23 +21,42 @@ import { configuration, Configuration } from './system/configuration';
 import { setContext } from './system/context';
 import { setDefaultDateLocales } from './system/date';
 import { once } from './system/event';
-import { getLoggableName, Logger } from './system/logger';
+import { BufferedLogChannel, getLoggableName, Logger } from './system/logger';
 import { flatten } from './system/object';
 import { Stopwatch } from './system/stopwatch';
 import { Storage } from './system/storage';
 import { compare, fromString, satisfies } from './system/version';
-import { isViewNode } from './views/nodes/viewNode';
+import { isViewNode } from './views/nodes/abstract/viewNode';
+import './commands';
 
 export async function activate(context: ExtensionContext): Promise<GitLensApi | undefined> {
 	const gitlensVersion: string = context.extension.packageJSON.version;
 	const prerelease = satisfies(gitlensVersion, '> 2020.0.0');
 
-	const outputLevel = configuration.get('outputLevel');
+	const defaultDateLocale = configuration.get('defaultDateLocale');
+	const logLevel = fromOutputLevel(configuration.get('outputLevel'));
 	Logger.configure(
 		{
 			name: 'GitLens',
 			createChannel: function (name: string) {
-				return window.createOutputChannel(name);
+				const channel = new BufferedLogChannel(window.createOutputChannel(name), 500);
+				context.subscriptions.push(channel);
+
+				if (logLevel === 'error' || logLevel === 'warn') {
+					channel.appendLine(
+						`GitLens${prerelease ? ' (pre-release)' : ''} v${gitlensVersion} activating in ${
+							env.appName
+						} (${codeVersion}) on the ${isWeb ? 'web' : 'desktop'}; language='${
+							env.language
+						}', logLevel='${logLevel}', defaultDateLocale='${defaultDateLocale}' (${env.machineId}|${
+							env.sessionId
+						})`,
+					);
+					channel.appendLine(
+						'To enable debug logging, set `"gitlens.outputLevel: "debug"` or run "GitLens: Enable Debug Logging" from the Command Palette',
+					);
+				}
+				return channel;
 			},
 			toLoggable: function (o: any) {
 				if (isGitUri(o)) {
@@ -48,6 +68,10 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 
 				if (isRepository(o) || isBranch(o) || isCommit(o) || isTag(o) || isViewNode(o)) return o.toString();
 
+				if ('rootUri' in o && o.rootUri instanceof Uri) {
+					return `ScmRepository(rootUri=${o.rootUri.toString(true)})`;
+				}
+
 				if ('uri' in o && o.uri instanceof Uri) {
 					return `${
 						'name' in o && 'index' in o ? 'WorkspaceFolder' : getLoggableName(o)
@@ -57,17 +81,15 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 				return undefined;
 			},
 		},
-		fromOutputLevel(outputLevel),
+		logLevel,
 		context.extensionMode === ExtensionMode.Development,
 	);
-
-	const defaultDateLocale = configuration.get('defaultDateLocale');
 
 	const sw = new Stopwatch(`GitLens${prerelease ? ' (pre-release)' : ''} v${gitlensVersion}`, {
 		log: {
 			message: ` activating in ${env.appName} (${codeVersion}) on the ${isWeb ? 'web' : 'desktop'}; language='${
 				env.language
-			}', defaultDateLocale='${defaultDateLocale}' (${env.machineId}|${env.sessionId})`,
+			}', logLevel='${logLevel}', defaultDateLocale='${defaultDateLocale}' (${env.machineId}|${env.sessionId})`,
 			//${context.extensionRuntime !== ExtensionRuntime.Node ? ' in a webworker' : ''}
 		},
 	});
@@ -158,9 +180,9 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 			void storage.store(prerelease ? 'synced:preVersion' : 'synced:version', gitlensVersion);
 		}
 
-		if (outputLevel === 'debug') {
+		if (logLevel === 'debug') {
 			setTimeout(async () => {
-				if (configuration.get('outputLevel') !== 'debug') return;
+				if (fromOutputLevel(configuration.get('outputLevel')) !== 'debug') return;
 
 				if (!container.prereleaseOrDebugging) {
 					if (await showDebugLoggingWarningMessage()) {
@@ -184,7 +206,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 	await container.ready();
 
 	// TODO@eamodio do we want to capture any vscode settings that are relevant to GitLens?
-	const flatCfg = flatten(configuration.getAll(true), { prefix: 'config', stringify: 'all' });
+	const flatCfg = flatten(configuration.getAll(true), 'config', { joinArrays: true });
 
 	container.telemetry.setGlobalAttributes({
 		debugging: container.debugging,
@@ -202,7 +224,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 	const elapsed = sw.elapsed();
 
 	sw.stop({
-		message: ` activated${exitMessage != null ? `, ${exitMessage}` : ''}${
+		message: `activated${exitMessage != null ? `, ${exitMessage}` : ''}${
 			mode != null ? `, mode: ${mode.name}` : ''
 		}`,
 	});
@@ -214,6 +236,7 @@ export async function activate(context: ExtensionContext): Promise<GitLensApi | 
 			'activation.mode': mode?.name,
 			...flatCfg,
 		},
+		undefined,
 		startTime,
 		endTime,
 	);
@@ -255,8 +278,8 @@ function registerBuiltInActionRunners(container: Container): void {
 					compare: ctx.branch.isRemote
 						? getBranchNameWithoutRemote(ctx.branch.name)
 						: ctx.branch.upstream
-						? getBranchNameWithoutRemote(ctx.branch.upstream)
-						: ctx.branch.name,
+						  ? getBranchNameWithoutRemote(ctx.branch.upstream)
+						  : ctx.branch.name,
 					remote: ctx.remote?.name ?? '',
 					repoPath: ctx.repoPath,
 				}));

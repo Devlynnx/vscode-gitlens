@@ -96,13 +96,13 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		let treeItem;
 
 		const searchTree = this._searchTreeMap.get(ref);
-		if (searchTree !== undefined) {
+		if (searchTree != null) {
 			// Add the fake root folder to the path
 			treeItem = (await searchTree).get(`/~/${path}`);
 		} else {
 			if (path == null || path.length === 0) {
 				const tree = await this.getTree(path, ref, repoPath);
-				if (tree === undefined) throw FileSystemError.FileNotFound(uri);
+				if (tree == null) throw FileSystemError.FileNotFound(uri);
 
 				return {
 					type: FileType.Directory,
@@ -115,9 +115,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 			treeItem = await this.container.git.getTreeEntryForRevision(repoPath, path, ref);
 		}
 
-		if (treeItem === undefined) {
-			throw FileSystemError.FileNotFound(uri);
-		}
+		if (treeItem == null) throw FileSystemError.FileNotFound(uri);
 
 		return {
 			type: typeToFileType(treeItem.type),
@@ -144,7 +142,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		const trees = await this.container.git.getTreeForRevision(repoPath, ref);
 
 		// Add a fake root folder so that searches will work
-		searchTree.set('~', { commitSha: '', path: '~', size: 0, type: 'tree' });
+		searchTree.set('~', { ref: '', oid: '', path: '~', size: 0, type: 'tree' });
 		for (const item of trees) {
 			searchTree.set(`~/${item.path}`, item);
 		}

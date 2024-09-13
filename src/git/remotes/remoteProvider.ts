@@ -2,16 +2,29 @@ import type { Range, Uri } from 'vscode';
 import { env } from 'vscode';
 import type { DynamicAutolinkReference } from '../../annotations/autolinks';
 import type { AutolinkReference } from '../../config';
+import type { GkProviderId } from '../../gk/models/repositoryIdentities';
+import type { ResourceDescriptor } from '../../plus/integrations/integration';
 import { memoize } from '../../system/decorators/memoize';
 import { encodeUrl } from '../../system/encoding';
-import type { RemoteProviderReference } from '../models/remoteProvider';
+import { getSettledValue } from '../../system/promise';
+import { openUrl } from '../../system/utils';
+import type { ProviderReference } from '../models/remoteProvider';
 import type { RemoteResource } from '../models/remoteResource';
 import { RemoteResourceType } from '../models/remoteResource';
 import type { Repository } from '../models/repository';
-import type { RichRemoteProvider } from './richRemoteProvider';
 
-export abstract class RemoteProvider implements RemoteProviderReference {
-	readonly type: 'simple' | 'rich' = 'simple';
+export type RemoteProviderId =
+	| 'azure-devops'
+	| 'bitbucket'
+	| 'bitbucket-server'
+	| 'custom'
+	| 'gerrit'
+	| 'gitea'
+	| 'github'
+	| 'gitlab'
+	| 'google-source';
+
+export abstract class RemoteProvider<T extends ResourceDescriptor = ResourceDescriptor> implements ProviderReference {
 	protected readonly _name: string | undefined;
 
 	constructor(
@@ -22,11 +35,6 @@ export abstract class RemoteProvider implements RemoteProviderReference {
 		public readonly custom: boolean = false,
 	) {
 		this._name = name;
-	}
-
-	@memoize()
-	get remoteKey() {
-		return this.domain ? `${this.domain}/${this.path}` : this.path;
 	}
 
 	get autolinks(): (AutolinkReference | DynamicAutolinkReference)[] {
@@ -46,27 +54,31 @@ export abstract class RemoteProvider implements RemoteProviderReference {
 	}
 
 	get owner(): string | undefined {
-		return this.path.split('/')[0];
+		return this.splitPath()[0];
 	}
 
-	abstract get id(): string;
+	@memoize()
+	get remoteKey() {
+		return this.domain ? `${this.domain}/${this.path}` : this.path;
+	}
+
+	get repoDesc(): T {
+		return { owner: this.owner, name: this.repoName } as unknown as T;
+	}
+
+	get repoName(): string | undefined {
+		return this.splitPath()[1];
+	}
+
+	abstract get id(): RemoteProviderId;
+	abstract get gkProviderId(): GkProviderId | undefined;
 	abstract get name(): string;
 
-	async copy(resource: RemoteResource): Promise<void> {
-		const url = this.url(resource);
-		if (url == null) {
-			return;
-		}
+	async copy(resource: RemoteResource | RemoteResource[]): Promise<void> {
+		const urls = this.getUrlsFromResources(resource);
+		if (!urls.length) return;
 
-		await env.clipboard.writeText(url);
-	}
-
-	hasRichIntegration(): this is RichRemoteProvider {
-		return this.type === 'rich';
-	}
-
-	get maybeConnected(): boolean | undefined {
-		return false;
+		await env.clipboard.writeText(urls.join('\n'));
 	}
 
 	abstract getLocalInfoFromRemoteUri(
@@ -75,8 +87,12 @@ export abstract class RemoteProvider implements RemoteProviderReference {
 		options?: { validate?: boolean },
 	): Promise<{ uri: Uri; startLine?: number; endLine?: number } | undefined>;
 
-	open(resource: RemoteResource): Promise<boolean | undefined> {
-		return this.openUrl(this.url(resource));
+	async open(resource: RemoteResource | RemoteResource[]): Promise<boolean | undefined> {
+		const urls = this.getUrlsFromResources(resource);
+		if (!urls.length) return false;
+
+		const results = await Promise.allSettled(urls.map(openUrl));
+		return results.every(r => getSettledValue(r) === true);
 	}
 
 	url(resource: RemoteResource): string | undefined {
@@ -152,17 +168,32 @@ export abstract class RemoteProvider implements RemoteProviderReference {
 		return this.baseUrl;
 	}
 
-	private async openUrl(url?: string): Promise<boolean | undefined> {
-		if (url == null) return undefined;
-
-		// Pass a string to openExternal to avoid double encoding issues: https://github.com/microsoft/vscode/issues/85930
-		// vscode.d.ts currently says it only supports a Uri, but it actually accepts a string too
-		return (env.openExternal as unknown as (target: string) => Thenable<boolean>)(url);
-	}
-
 	protected encodeUrl(url: string): string;
 	protected encodeUrl(url: string | undefined): string | undefined;
 	protected encodeUrl(url: string | undefined): string | undefined {
 		return encodeUrl(url)?.replace(/#/g, '%23');
 	}
+
+	private getUrlsFromResources(resource: RemoteResource | RemoteResource[]): string[] {
+		const urls: string[] = [];
+
+		if (Array.isArray(resource)) {
+			for (const r of resource) {
+				const url = this.url(r);
+				if (url == null) continue;
+
+				urls.push(url);
+			}
+		} else {
+			const url = this.url(resource);
+			if (url != null) {
+				urls.push(url);
+			}
+		}
+		return urls;
+	}
+}
+
+export function getRemoteProviderThemeIconString(provider: RemoteProvider | undefined): string {
+	return provider != null ? `gitlens-provider-${provider.icon}` : 'cloud';
 }

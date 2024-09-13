@@ -3,7 +3,7 @@ import type { Disposable } from 'vscode';
 import { version as codeVersion, env } from 'vscode';
 import { getProxyAgent } from '@env/fetch';
 import { getPlatform } from '@env/platform';
-import type { TelemetryEvents } from '../constants';
+import type { Source, TelemetryEvents, TelemetryGlobalContext } from '../constants';
 import type { Container } from '../container';
 import { configuration } from '../system/configuration';
 
@@ -23,16 +23,18 @@ export interface TelemetryContext {
 	vscodeVersion: string;
 }
 
+export type TelemetryEventData = Record<string, AttributeValue | null | undefined>;
+
 export interface TelemetryProvider extends Disposable {
 	sendEvent(name: string, data?: Record<string, AttributeValue>, startTime?: TimeInput, endTime?: TimeInput): void;
 	startEvent(name: string, data?: Record<string, AttributeValue>, startTime?: TimeInput): Span;
 	setGlobalAttributes(attributes: Map<string, AttributeValue>): void;
 }
 
-interface QueuedEvent {
+interface QueuedEvent<T extends keyof TelemetryEvents = keyof TelemetryEvents> {
 	type: 'sendEvent';
-	name: TelemetryEvents;
-	data?: Record<string, AttributeValue | null | undefined>;
+	name: T;
+	data?: TelemetryEvents[T];
 	global: Map<string, AttributeValue>;
 	startTime: TimeInput;
 	endTime: TimeInput;
@@ -121,6 +123,7 @@ export class TelemetryService implements Disposable {
 			for (const { type, name, data, global } of queue) {
 				if (type === 'sendEvent') {
 					this.provider.setGlobalAttributes(global);
+					assertsTelemetryEventData(data);
 					this.provider.sendEvent(name, stripNullOrUndefinedAttributes(data));
 				}
 			}
@@ -129,20 +132,24 @@ export class TelemetryService implements Disposable {
 		this.provider.setGlobalAttributes(this.globalAttributes);
 	}
 
-	sendEvent(
-		name: TelemetryEvents,
-		data?: Record<string, AttributeValue | null | undefined>,
+	sendEvent<T extends keyof TelemetryEvents>(
+		name: T,
+		data?: TelemetryEvents[T],
+		source?: Source,
 		startTime?: TimeInput,
 		endTime?: TimeInput,
 	): void {
 		if (!this._enabled) return;
+
+		assertsTelemetryEventData(data);
+		addSourceAttributes(source, data);
 
 		if (this.provider == null) {
 			this.eventQueue.push({
 				type: 'sendEvent',
 				name: name,
 				data: data,
-				global: new Map([...this.globalAttributes]),
+				global: new Map(this.globalAttributes),
 				startTime: startTime ?? Date.now(),
 				endTime: endTime ?? Date.now(),
 			});
@@ -152,12 +159,16 @@ export class TelemetryService implements Disposable {
 		this.provider.sendEvent(name, stripNullOrUndefinedAttributes(data), startTime, endTime);
 	}
 
-	startEvent(
-		name: TelemetryEvents,
-		data?: Record<string, AttributeValue | null | undefined>,
+	startEvent<T extends keyof TelemetryEvents>(
+		name: T,
+		data?: TelemetryEvents[T],
+		source?: Source,
 		startTime?: TimeInput,
 	): Disposable | undefined {
 		if (!this._enabled) return undefined;
+
+		assertsTelemetryEventData(data);
+		addSourceAttributes(source, data);
 
 		if (this.provider != null) {
 			const span = this.provider.startEvent(name, stripNullOrUndefinedAttributes(data), startTime);
@@ -168,7 +179,7 @@ export class TelemetryService implements Disposable {
 
 		startTime = startTime ?? Date.now();
 		return {
-			dispose: () => this.sendEvent(name, data, startTime, Date.now()),
+			dispose: () => this.sendEvent(name, data, source, startTime, Date.now()),
 		};
 	}
 
@@ -184,29 +195,51 @@ export class TelemetryService implements Disposable {
 	// ): void {
 	// }
 
-	setGlobalAttribute(key: string, value: AttributeValue | null | undefined): void {
+	setGlobalAttribute<T extends keyof TelemetryGlobalContext>(
+		key: T,
+		value: TelemetryGlobalContext[T] | null | undefined,
+	): void {
 		if (value == null) {
-			this.globalAttributes.delete(key);
+			this.globalAttributes.delete(`global.${key}`);
 		} else {
-			this.globalAttributes.set(key, value);
+			this.globalAttributes.set(`global.${key}`, value);
 		}
 		this.provider?.setGlobalAttributes(this.globalAttributes);
 	}
 
-	setGlobalAttributes(attributes: Record<string, AttributeValue | null | undefined>): void {
+	setGlobalAttributes(attributes: Partial<TelemetryGlobalContext>): void {
 		for (const [key, value] of Object.entries(attributes)) {
 			if (value == null) {
-				this.globalAttributes.delete(key);
+				this.globalAttributes.delete(`global.${key}`);
 			} else {
-				this.globalAttributes.set(key, value);
+				this.globalAttributes.set(`global.${key}`, value);
 			}
 		}
 		this.provider?.setGlobalAttributes(this.globalAttributes);
 	}
 
-	deleteGlobalAttribute(key: string): void {
-		this.globalAttributes.delete(key);
+	deleteGlobalAttribute(key: keyof TelemetryGlobalContext): void {
+		this.globalAttributes.delete(`global.${key}`);
 		this.provider?.setGlobalAttributes(this.globalAttributes);
+	}
+}
+
+function addSourceAttributes(
+	source: Source | undefined,
+	data: Record<string, AttributeValue | null | undefined> | undefined,
+) {
+	if (source == null) return;
+
+	data ??= {};
+	data['source.name'] = source.source;
+	if (source.detail != null) {
+		if (typeof source.detail === 'string') {
+			data['source.detail'] = source.detail;
+		} else if (typeof source.detail === 'object') {
+			for (const [key, value] of Object.entries(source.detail)) {
+				data[`source.detail.${key}`] = value;
+			}
+		}
 	}
 }
 
@@ -220,4 +253,10 @@ function stripNullOrUndefinedAttributes(data: Record<string, AttributeValue | nu
 		attributes![key] = value;
 	}
 	return attributes;
+}
+
+function assertsTelemetryEventData(data: any): asserts data is TelemetryEventData {
+	if (data == null || typeof data === 'object') return;
+
+	debugger;
 }

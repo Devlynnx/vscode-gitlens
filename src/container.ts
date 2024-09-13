@@ -1,7 +1,7 @@
 import type { ConfigurationChangeEvent, Disposable, Event, ExtensionContext } from 'vscode';
-import { EventEmitter, ExtensionMode } from 'vscode';
+import { EventEmitter, ExtensionMode, Uri } from 'vscode';
 import { getSupportedGitProviders, getSupportedRepositoryPathMappingProvider } from '@env/providers';
-import { AIProviderService } from './ai/aiProviderService';
+import type { AIProviderService } from './ai/aiProviderService';
 import { Autolinks } from './annotations/autolinks';
 import { FileAnnotationController } from './annotations/fileAnnotationController';
 import { LineAnnotationController } from './annotations/lineAnnotationController';
@@ -9,31 +9,49 @@ import { ActionRunners } from './api/actionRunners';
 import { setDefaultGravatarsStyle } from './avatars';
 import { CacheProvider } from './cache';
 import { GitCodeLensController } from './codelens/codeLensController';
-import type { ToggleFileAnnotationCommandArgs } from './commands';
+import type { ToggleFileAnnotationCommandArgs } from './commands/toggleFileAnnotations';
 import type { DateStyle, FileAnnotationType, ModeConfig } from './config';
 import { fromOutputLevel } from './config';
 import { Commands, extensionPrefix } from './constants';
 import { EventBus } from './eventBus';
 import { GitFileSystemProvider } from './git/fsProvider';
 import { GitProviderService } from './git/gitProviderService';
-import { GitHubAuthenticationProvider } from './git/remotes/github';
-import { GitLabAuthenticationProvider } from './git/remotes/gitlab';
-import { RichRemoteProviderService } from './git/remotes/remoteProviderService';
 import { LineHoverController } from './hovers/lineHoverController';
 import type { RepositoryPathMappingProvider } from './pathMapping/repositoryPathMappingProvider';
-import { AccountAuthenticationProvider } from './plus/gk/authenticationProvider';
+import { DraftService } from './plus/drafts/draftsService';
+import { EnrichmentService } from './plus/focus/enrichmentService';
+import { FocusIndicator } from './plus/focus/focusIndicator';
+import { FocusProvider } from './plus/focus/focusProvider';
+import { AccountAuthenticationProvider } from './plus/gk/account/authenticationProvider';
+import { OrganizationService } from './plus/gk/account/organizationService';
+import { SubscriptionService } from './plus/gk/account/subscriptionService';
 import { ServerConnection } from './plus/gk/serverConnection';
-import { IntegrationAuthenticationService } from './plus/integrationAuthentication';
-import { SubscriptionService } from './plus/subscription/subscriptionService';
+import type { CloudIntegrationService } from './plus/integrations/authentication/cloudIntegrationService';
+import { IntegrationAuthenticationService } from './plus/integrations/authentication/integrationAuthentication';
+import { IntegrationService } from './plus/integrations/integrationService';
+import type { GitHubApi } from './plus/integrations/providers/github/github';
+import type { GitLabApi } from './plus/integrations/providers/gitlab/gitlab';
+import { RepositoryIdentityService } from './plus/repos/repositoryIdentityService';
 import { registerAccountWebviewView } from './plus/webviews/account/registration';
-import { registerFocusWebviewPanel } from './plus/webviews/focus/registration';
+import { registerFocusWebviewCommands, registerFocusWebviewPanel } from './plus/webviews/focus/registration';
+import type { GraphWebviewShowingArgs } from './plus/webviews/graph/registration';
 import {
 	registerGraphWebviewCommands,
 	registerGraphWebviewPanel,
 	registerGraphWebviewView,
 } from './plus/webviews/graph/registration';
 import { GraphStatusBarController } from './plus/webviews/graph/statusbar';
-import { registerTimelineWebviewPanel, registerTimelineWebviewView } from './plus/webviews/timeline/registration';
+import type { PatchDetailsWebviewShowingArgs } from './plus/webviews/patchDetails/registration';
+import {
+	registerPatchDetailsWebviewPanel,
+	registerPatchDetailsWebviewView,
+} from './plus/webviews/patchDetails/registration';
+import type { TimelineWebviewShowingArgs } from './plus/webviews/timeline/registration';
+import {
+	registerTimelineWebviewCommands,
+	registerTimelineWebviewPanel,
+	registerTimelineWebviewView,
+} from './plus/webviews/timeline/registration';
 import { scheduleAddMissingCurrentWorkspaceRepos, WorkspacesService } from './plus/workspaces/workspacesService';
 import { StatusBarController } from './statusbar/statusBarController';
 import { executeCommand } from './system/command';
@@ -46,15 +64,17 @@ import type { Storage } from './system/storage';
 import { TelemetryService } from './telemetry/telemetry';
 import { UsageTracker } from './telemetry/usageTracker';
 import { GitTerminalLinkProvider } from './terminal/linkProvider';
-import { GitDocumentTracker } from './trackers/gitDocumentTracker';
-import { GitLineTracker } from './trackers/gitLineTracker';
+import { GitDocumentTracker } from './trackers/documentTracker';
+import { LineTracker } from './trackers/lineTracker';
 import { DeepLinkService } from './uris/deepLinks/deepLinkService';
 import { UriService } from './uris/uriService';
 import { BranchesView } from './views/branchesView';
 import { CommitsView } from './views/commitsView';
 import { ContributorsView } from './views/contributorsView';
+import { DraftsView } from './views/draftsView';
 import { FileHistoryView } from './views/fileHistoryView';
 import { LineHistoryView } from './views/lineHistoryView';
+import { PullRequestView } from './views/pullRequestView';
 import { RemotesView } from './views/remotesView';
 import { RepositoriesView } from './views/repositoriesView';
 import { SearchAndCompareView } from './views/searchAndCompareView';
@@ -65,6 +85,7 @@ import { ViewFileDecorationProvider } from './views/viewDecorationProvider';
 import { WorkspacesView } from './views/workspacesView';
 import { WorktreesView } from './views/worktreesView';
 import { VslsController } from './vsls/vsls';
+import type { CommitDetailsWebviewShowingArgs } from './webviews/commitDetails/registration';
 import {
 	registerCommitDetailsWebviewView,
 	registerGraphDetailsWebviewView,
@@ -72,7 +93,7 @@ import {
 import { registerHomeWebviewView } from './webviews/home/registration';
 import { RebaseEditorProvider } from './webviews/rebase/rebaseEditor';
 import { registerSettingsWebviewCommands, registerSettingsWebviewPanel } from './webviews/settings/registration';
-import type { WebviewPanelProxy, WebviewViewProxy } from './webviews/webviewsController';
+import type { WebviewViewProxy } from './webviews/webviewsController';
 import { WebviewsController } from './webviews/webviewsController';
 import { registerWelcomeWebviewPanel } from './webviews/welcome/registration';
 
@@ -171,6 +192,7 @@ export class Container {
 	private _disposables: Disposable[];
 	private _terminalLinks: GitTerminalLinkProvider | undefined;
 	private _webviews: WebviewsController;
+	private _focusIndicator: FocusIndicator | undefined;
 
 	private constructor(
 		context: ExtensionContext,
@@ -196,21 +218,22 @@ export class Container {
 		this._disposables.push(
 			(this._accountAuthentication = new AccountAuthenticationProvider(this, this._connection)),
 		);
+		this._disposables.push((this._uri = new UriService(this)));
 		this._disposables.push((this._subscription = new SubscriptionService(this, this._connection, previousVersion)));
+		this._disposables.push((this._organizations = new OrganizationService(this, this._connection)));
 
 		this._disposables.push((this._git = new GitProviderService(this)));
 		this._disposables.push(new GitFileSystemProvider(this));
 
-		this._disposables.push((this._uri = new UriService(this)));
-
 		this._disposables.push((this._deepLinks = new DeepLinkService(this)));
 
 		this._disposables.push((this._actionRunners = new ActionRunners(this)));
-		this._disposables.push((this._tracker = new GitDocumentTracker(this)));
-		this._disposables.push((this._lineTracker = new GitLineTracker(this)));
+		this._disposables.push((this._documentTracker = new GitDocumentTracker(this)));
+		this._disposables.push((this._lineTracker = new LineTracker(this, this._documentTracker)));
 		this._disposables.push((this._keyboard = new Keyboard()));
 		this._disposables.push((this._vsls = new VslsController(this)));
 		this._disposables.push((this._eventBus = new EventBus()));
+		this._disposables.push((this._focusProvider = new FocusProvider(this)));
 
 		this._disposables.push((this._fileAnnotationController = new FileAnnotationController(this)));
 		this._disposables.push((this._lineAnnotationController = new LineAnnotationController(this)));
@@ -219,27 +242,40 @@ export class Container {
 		this._disposables.push((this._codeLensController = new GitCodeLensController(this)));
 
 		this._disposables.push((this._webviews = new WebviewsController(this)));
-		this._disposables.push(registerTimelineWebviewPanel(this._webviews));
-		this._disposables.push((this._timelineView = registerTimelineWebviewView(this._webviews)));
 
-		this._disposables.push((this._graphPanel = registerGraphWebviewPanel(this._webviews)));
-		this._disposables.push(registerGraphWebviewCommands(this, this._graphPanel));
+		const graphPanels = registerGraphWebviewPanel(this._webviews);
+		this._disposables.push(graphPanels);
+		this._disposables.push(registerGraphWebviewCommands(this, graphPanels));
 		this._disposables.push((this._graphView = registerGraphWebviewView(this._webviews)));
 		this._disposables.push(new GraphStatusBarController(this));
 
-		const settingsWebviewPanel = registerSettingsWebviewPanel(this._webviews);
-		this._disposables.push(settingsWebviewPanel);
-		this._disposables.push(registerSettingsWebviewCommands(settingsWebviewPanel));
-		this._disposables.push(registerWelcomeWebviewPanel(this._webviews));
+		const focusPanels = registerFocusWebviewPanel(this._webviews);
+		this._disposables.push(focusPanels);
+		this._disposables.push(registerFocusWebviewCommands(focusPanels));
+
+		const timelinePanels = registerTimelineWebviewPanel(this._webviews);
+		this._disposables.push(timelinePanels);
+		this._disposables.push(registerTimelineWebviewCommands(timelinePanels));
+		this._disposables.push((this._timelineView = registerTimelineWebviewView(this._webviews)));
+
 		this._disposables.push((this._rebaseEditor = new RebaseEditorProvider(this)));
-		this._disposables.push(registerFocusWebviewPanel(this._webviews));
+
+		const settingsPanels = registerSettingsWebviewPanel(this._webviews);
+		this._disposables.push(settingsPanels);
+		this._disposables.push(registerSettingsWebviewCommands(settingsPanels));
+
+		this._disposables.push(registerWelcomeWebviewPanel(this._webviews));
 
 		this._disposables.push(new ViewFileDecorationProvider());
 
 		this._disposables.push((this._repositoriesView = new RepositoriesView(this)));
 		this._disposables.push((this._commitDetailsView = registerCommitDetailsWebviewView(this._webviews)));
+		const patchDetailsPanels = registerPatchDetailsWebviewPanel(this._webviews);
+		this._disposables.push(patchDetailsPanels);
+		this._disposables.push((this._patchDetailsView = registerPatchDetailsWebviewView(this._webviews)));
 		this._disposables.push((this._graphDetailsView = registerGraphDetailsWebviewView(this._webviews)));
 		this._disposables.push((this._commitsView = new CommitsView(this)));
+		this._disposables.push((this._pullRequestView = new PullRequestView(this)));
 		this._disposables.push((this._fileHistoryView = new FileHistoryView(this)));
 		this._disposables.push((this._lineHistoryView = new LineHistoryView(this)));
 		this._disposables.push((this._branchesView = new BranchesView(this)));
@@ -249,10 +285,15 @@ export class Container {
 		this._disposables.push((this._worktreesView = new WorktreesView(this)));
 		this._disposables.push((this._contributorsView = new ContributorsView(this)));
 		this._disposables.push((this._searchAndCompareView = new SearchAndCompareView(this)));
+		this._disposables.push((this._draftsView = new DraftsView(this)));
 		this._disposables.push((this._workspacesView = new WorkspacesView(this)));
 
 		this._disposables.push((this._homeView = registerHomeWebviewView(this._webviews)));
 		this._disposables.push((this._accountView = registerAccountWebviewView(this._webviews)));
+
+		if (configuration.get('launchpad.indicator.enabled')) {
+			this._disposables.push((this._focusIndicator = new FocusIndicator(this, this._focusProvider)));
+		}
 
 		if (configuration.get('terminalLinks.enabled')) {
 			this._disposables.push((this._terminalLinks = new GitTerminalLinkProvider(this)));
@@ -260,11 +301,23 @@ export class Container {
 
 		this._disposables.push(
 			configuration.onDidChange(e => {
-				if (!configuration.changed(e, 'terminalLinks.enabled')) return;
+				if (configuration.changed(e, 'terminalLinks.enabled')) {
+					this._terminalLinks?.dispose();
+					this._terminalLinks = undefined;
+					if (configuration.get('terminalLinks.enabled')) {
+						this._disposables.push((this._terminalLinks = new GitTerminalLinkProvider(this)));
+					}
+				}
 
-				this._terminalLinks?.dispose();
-				if (configuration.get('terminalLinks.enabled')) {
-					this._disposables.push((this._terminalLinks = new GitTerminalLinkProvider(this)));
+				if (configuration.changed(e, 'launchpad.indicator.enabled')) {
+					this._focusIndicator?.dispose();
+					this._focusIndicator = undefined;
+
+					this.telemetry.sendEvent('launchpad/indicator/hidden');
+
+					if (configuration.get('launchpad.indicator.enabled')) {
+						this._disposables.push((this._focusIndicator = new FocusIndicator(this, this._focusProvider)));
+					}
 				}
 			}),
 		);
@@ -329,15 +382,33 @@ export class Container {
 		return this._accountAuthentication;
 	}
 
+	private readonly _accountView: WebviewViewProxy<[]>;
+	get accountView() {
+		return this._accountView;
+	}
+
 	private readonly _actionRunners: ActionRunners;
 	get actionRunners() {
 		return this._actionRunners;
 	}
 
-	private _ai: AIProviderService | undefined;
+	private _ai: Promise<AIProviderService | undefined> | undefined;
 	get ai() {
 		if (this._ai == null) {
-			this._disposables.push((this._ai = new AIProviderService(this)));
+			async function load(this: Container) {
+				try {
+					const ai = new (
+						await import(/* webpackChunkName: "ai" */ './ai/aiProviderService')
+					).AIProviderService(this);
+					this._disposables.push(ai);
+					return ai;
+				} catch (ex) {
+					Logger.error(ex);
+					return undefined;
+				}
+			}
+
+			this._ai = load.call(this);
 		}
 		return this._ai;
 	}
@@ -365,6 +436,50 @@ export class Container {
 		return this._cache;
 	}
 
+	private _cloudIntegrations: Promise<CloudIntegrationService | undefined> | undefined;
+	get cloudIntegrations() {
+		if (this._cloudIntegrations == null) {
+			async function load(this: Container) {
+				try {
+					const cloudIntegrations = new (
+						await import(
+							/* webpackChunkName: "integrations" */ './plus/integrations/authentication/cloudIntegrationService'
+						)
+					).CloudIntegrationService(this, this._connection);
+					return cloudIntegrations;
+				} catch (ex) {
+					Logger.error(ex);
+					return undefined;
+				}
+			}
+
+			this._cloudIntegrations = load.call(this);
+		}
+
+		return this._cloudIntegrations;
+	}
+
+	private _drafts: DraftService | undefined;
+	get drafts() {
+		if (this._drafts == null) {
+			this._disposables.push((this._drafts = new DraftService(this, this._connection)));
+		}
+		return this._drafts;
+	}
+
+	private _repositoryIdentity: RepositoryIdentityService | undefined;
+	get repositoryIdentity() {
+		if (this._repositoryIdentity == null) {
+			this._disposables.push((this._repositoryIdentity = new RepositoryIdentityService(this, this._connection)));
+		}
+		return this._repositoryIdentity;
+	}
+
+	private readonly _draftsView: DraftsView;
+	get draftsView() {
+		return this._draftsView;
+	}
+
 	private readonly _codeLensController: GitCodeLensController;
 	get codeLens() {
 		return this._codeLensController;
@@ -375,7 +490,7 @@ export class Container {
 		return this._commitsView;
 	}
 
-	private readonly _commitDetailsView: WebviewViewProxy;
+	private readonly _commitDetailsView: WebviewViewProxy<CommitDetailsWebviewShowingArgs>;
 	get commitDetailsView() {
 		return this._commitDetailsView;
 	}
@@ -393,6 +508,25 @@ export class Container {
 	@memoize()
 	get debugging() {
 		return this._context.extensionMode === ExtensionMode.Development;
+	}
+
+	private readonly _deepLinks: DeepLinkService;
+	get deepLinks() {
+		return this._deepLinks;
+	}
+
+	private readonly _documentTracker: GitDocumentTracker;
+	get documentTracker() {
+		return this._documentTracker;
+	}
+
+	private _enrichments: EnrichmentService | undefined;
+	get enrichments() {
+		if (this._enrichments == null) {
+			this._disposables.push((this._enrichments = new EnrichmentService(this, new ServerConnection(this))));
+		}
+
+		return this._enrichments;
 	}
 
 	@memoize()
@@ -421,80 +555,77 @@ export class Container {
 		return this._fileHistoryView;
 	}
 
+	private readonly _focusProvider: FocusProvider;
+	get focus(): FocusProvider {
+		return this._focusProvider;
+	}
+
 	private readonly _git: GitProviderService;
 	get git() {
 		return this._git;
 	}
 
-	private readonly _uri: UriService;
-	get uri() {
-		return this._uri;
-	}
-
-	private readonly _deepLinks: DeepLinkService;
-	get deepLinks() {
-		return this._deepLinks;
-	}
-
-	private _github: Promise<import('./plus/github/github').GitHubApi | undefined> | undefined;
+	private _github: Promise<GitHubApi | undefined> | undefined;
 	get github() {
 		if (this._github == null) {
-			this._github = this._loadGitHubApi();
+			async function load(this: Container) {
+				try {
+					const github = new (
+						await import(
+							/* webpackChunkName: "integrations" */ './plus/integrations/providers/github/github'
+						)
+					).GitHubApi(this);
+					this._disposables.push(github);
+					return github;
+				} catch (ex) {
+					Logger.error(ex);
+					return undefined;
+				}
+			}
+
+			this._github = load.call(this);
 		}
 
 		return this._github;
 	}
 
-	private async _loadGitHubApi() {
-		try {
-			const github = new (await import(/* webpackChunkName: "github" */ './plus/github/github')).GitHubApi(this);
-			this._disposables.push(github);
-			return github;
-		} catch (ex) {
-			Logger.error(ex);
-			return undefined;
-		}
-	}
-
-	private _gitlab: Promise<import('./plus/gitlab/gitlab').GitLabApi | undefined> | undefined;
+	private _gitlab: Promise<GitLabApi | undefined> | undefined;
 	get gitlab() {
 		if (this._gitlab == null) {
-			this._gitlab = this._loadGitLabApi();
+			async function load(this: Container) {
+				try {
+					const gitlab = new (
+						await import(
+							/* webpackChunkName: "integrations" */ './plus/integrations/providers/gitlab/gitlab'
+						)
+					).GitLabApi(this);
+					this._disposables.push(gitlab);
+					return gitlab;
+				} catch (ex) {
+					Logger.error(ex);
+					return undefined;
+				}
+			}
+
+			this._gitlab = load.call(this);
 		}
 
 		return this._gitlab;
 	}
 
-	private async _loadGitLabApi() {
-		try {
-			const gitlab = new (await import(/* webpackChunkName: "gitlab" */ './plus/gitlab/gitlab')).GitLabApi(this);
-			this._disposables.push(gitlab);
-			return gitlab;
-		} catch (ex) {
-			Logger.error(ex);
-			return undefined;
-		}
-	}
-
-	private readonly _graphDetailsView: WebviewViewProxy;
+	private readonly _graphDetailsView: WebviewViewProxy<CommitDetailsWebviewShowingArgs>;
 	get graphDetailsView() {
 		return this._graphDetailsView;
 	}
 
-	private readonly _graphPanel: WebviewPanelProxy;
-	private readonly _graphView: WebviewViewProxy;
+	private readonly _graphView: WebviewViewProxy<GraphWebviewShowingArgs>;
 	get graphView() {
 		return this._graphView;
 	}
 
-	private readonly _homeView: WebviewViewProxy;
+	private readonly _homeView: WebviewViewProxy<[]>;
 	get homeView() {
 		return this._homeView;
-	}
-
-	private readonly _accountView: WebviewViewProxy;
-	get accountView() {
-		return this._accountView;
 	}
 
 	@memoize()
@@ -502,18 +633,16 @@ export class Container {
 		return this._context.extension.id;
 	}
 
-	private _integrationAuthentication: IntegrationAuthenticationService | undefined;
-	get integrationAuthentication() {
-		if (this._integrationAuthentication == null) {
+	private _integrations: IntegrationService | undefined;
+	get integrations(): IntegrationService {
+		if (this._integrations == null) {
+			const authenticationService = new IntegrationAuthenticationService(this);
 			this._disposables.push(
-				(this._integrationAuthentication = new IntegrationAuthenticationService(this)),
-				// Register any integration authentication providers
-				new GitHubAuthenticationProvider(this),
-				new GitLabAuthenticationProvider(this),
+				authenticationService,
+				(this._integrations = new IntegrationService(this, authenticationService)),
 			);
 		}
-
-		return this._integrationAuthentication;
+		return this._integrations;
 	}
 
 	private readonly _keyboard: Keyboard;
@@ -536,9 +665,27 @@ export class Container {
 		return this._lineHoverController;
 	}
 
-	private readonly _lineTracker: GitLineTracker;
+	private readonly _lineTracker: LineTracker;
 	get lineTracker() {
 		return this._lineTracker;
+	}
+
+	private _mode: ModeConfig | undefined;
+	get mode() {
+		if (this._mode == null) {
+			this._mode = configuration.get('modes')?.[configuration.get('mode.active')];
+		}
+		return this._mode;
+	}
+
+	private _organizations: OrganizationService;
+	get organizations() {
+		return this._organizations;
+	}
+
+	private readonly _patchDetailsView: WebviewViewProxy<PatchDetailsWebviewShowingArgs>;
+	get patchDetailsView() {
+		return this._patchDetailsView;
 	}
 
 	private readonly _prerelease;
@@ -549,6 +696,11 @@ export class Container {
 	@memoize()
 	get prereleaseOrDebugging() {
 		return this._prerelease || this.debugging;
+	}
+
+	private readonly _pullRequestView: PullRequestView;
+	get pullRequestView() {
+		return this._pullRequestView;
 	}
 
 	private readonly _rebaseEditor: RebaseEditorProvider;
@@ -572,14 +724,6 @@ export class Container {
 			this._disposables.push((this._repositoryPathMapping = getSupportedRepositoryPathMappingProvider(this)));
 		}
 		return this._repositoryPathMapping;
-	}
-
-	private _richRemoteProviders: RichRemoteProviderService | undefined;
-	get richRemoteProviders(): RichRemoteProviderService {
-		if (this._richRemoteProviders == null) {
-			this._richRemoteProviders = new RichRemoteProviderService(this);
-		}
-		return this._richRemoteProviders;
 	}
 
 	private readonly _searchAndCompareView: SearchAndCompareView;
@@ -617,14 +761,14 @@ export class Container {
 		return this._telemetry;
 	}
 
-	private readonly _timelineView: WebviewViewProxy;
+	private readonly _timelineView: WebviewViewProxy<TimelineWebviewShowingArgs>;
 	get timelineView() {
 		return this._timelineView;
 	}
 
-	private readonly _tracker: GitDocumentTracker;
-	get tracker() {
-		return this._tracker;
+	private readonly _uri: UriService;
+	get uri() {
+		return this._uri;
 	}
 
 	private readonly _usage: UsageTracker;
@@ -666,14 +810,6 @@ export class Container {
 	private readonly _worktreesView: WorktreesView;
 	get worktreesView() {
 		return this._worktreesView;
-	}
-
-	private _mode: ModeConfig | undefined;
-	get mode() {
-		if (this._mode == null) {
-			this._mode = configuration.get('modes')?.[configuration.get('mode.active')];
-		}
-		return this._mode;
 	}
 
 	private ensureModeApplied() {
@@ -776,6 +912,39 @@ export class Container {
 				};
 			},
 		});
+	}
+
+	@memoize()
+	private get baseGkDevUri(): Uri {
+		if (this.env === 'staging') {
+			return Uri.parse('https://staging.gitkraken.dev');
+		}
+
+		if (this.env === 'dev') {
+			return Uri.parse('https://dev.gitkraken.dev');
+		}
+
+		return Uri.parse('https://gitkraken.dev');
+	}
+
+	getGkDevUri(path?: string, query?: string): Uri {
+		let uri = path != null ? Uri.joinPath(this.baseGkDevUri, path) : this.baseGkDevUri;
+		if (query != null) {
+			uri = uri.with({ query: query });
+		}
+		return uri;
+	}
+
+	getGkDevExchangeUri(token: string, successPath: string, failurePath?: string): Uri {
+		return Uri.joinPath(this.baseGkDevUri, `api/exchange/${token}`).with({
+			query: `success=${encodeURIComponent(successPath)}${
+				failurePath ? `&failure=${encodeURIComponent(failurePath)}` : ''
+			}`,
+		});
+	}
+
+	generateWebGkDevUrl(path?: string): string {
+		return this.getGkDevUri(path, '?source=gitlens').toString();
 	}
 }
 

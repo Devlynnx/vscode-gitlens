@@ -16,17 +16,8 @@ import type {
 	StepSelection,
 	StepState,
 } from '../quickCommand';
-import {
-	appendReposToTitle,
-	canPickStepContinue,
-	createConfirmStep,
-	endSteps,
-	pickBranchOrTagStep,
-	pickCommitsStep,
-	pickRepositoryStep,
-	QuickCommand,
-	StepResultBreak,
-} from '../quickCommand';
+import { canPickStepContinue, createConfirmStep, endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
+import { appendReposToTitle, pickBranchOrTagStep, pickCommitsStep, pickRepositoryStep } from '../quickCommand.steps';
 
 interface Context {
 	repos: Repository[];
@@ -64,11 +55,18 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 			counter++;
 		}
 
-		if (
-			args?.state?.references != null &&
-			(!Array.isArray(args.state.references) || args.state.references.length !== 0)
-		) {
-			counter++;
+		if (args?.state?.references != null) {
+			if (Array.isArray(args.state.references)) {
+				if (args.state.references.length > 0) {
+					if (isRevisionReference(args.state.references[0])) {
+						counter += 2;
+					} else {
+						counter++;
+					}
+				}
+			} else {
+				counter++;
+			}
 		}
 
 		this.initialState = {
@@ -172,12 +170,27 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				}
 			}
 
+			if (context.selectedBranchOrTag == null && state.references?.length) {
+				const branches = await this.container.git.getCommitBranches(
+					state.repo.path,
+					state.references.map(r => r.ref),
+					undefined,
+					{ mode: 'contains' },
+				);
+				if (branches.length) {
+					const branch = await state.repo.getBranch(branches[0]);
+					if (branch != null) {
+						context.selectedBranchOrTag = branch;
+					}
+				}
+			}
+
 			if (state.counter < 3 && context.selectedBranchOrTag != null) {
 				const ref = createRevisionRange(context.destination.ref, context.selectedBranchOrTag.ref);
 
 				let log = context.cache.get(ref);
 				if (log == null) {
-					log = this.container.git.getLog(state.repo.path, { ref: ref, merges: false });
+					log = this.container.git.getLog(state.repo.path, { ref: ref, merges: 'first-parent' });
 					context.cache.set(ref, log);
 				}
 

@@ -3,16 +3,16 @@ import { GitUri } from '../../git/gitUri';
 import type { GitTrackingState } from '../../git/models/branch';
 import type { GitFileWithCommit } from '../../git/models/file';
 import type { GitStatus, GitStatusFile } from '../../git/models/status';
-import { groupBy, makeHierarchical } from '../../system/array';
-import { flatMap } from '../../system/iterable';
+import { makeHierarchical } from '../../system/array';
+import { flatMap, groupBy } from '../../system/iterable';
 import { joinPaths, normalizePath } from '../../system/path';
 import type { ViewsWithWorkingTree } from '../viewBase';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 import type { FileNode } from './folderNode';
 import { FolderNode } from './folderNode';
 import { UncommittedFileNode } from './UncommittedFileNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class UncommittedFilesNode extends ViewNode<ViewsWithWorkingTree> {
+export class UncommittedFilesNode extends ViewNode<'uncommitted-files', ViewsWithWorkingTree> {
 	constructor(
 		view: ViewsWithWorkingTree,
 		protected override readonly parent: ViewNode,
@@ -26,9 +26,9 @@ export class UncommittedFilesNode extends ViewNode<ViewsWithWorkingTree> {
 			  },
 		public readonly range: string | undefined,
 	) {
-		super(GitUri.fromRepoPath(status.repoPath), view, parent);
+		super('uncommitted-files', GitUri.fromRepoPath(status.repoPath), view, parent);
 
-		this._uniqueId = getViewNodeId('uncommitted-files', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {

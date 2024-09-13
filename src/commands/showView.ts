@@ -1,5 +1,6 @@
 import { Commands } from '../constants';
 import type { Container } from '../container';
+import type { GraphWebviewShowingArgs } from '../plus/webviews/graph/registration';
 import { command } from '../system/command';
 import type { CommandContext } from './base';
 import { Command } from './base';
@@ -12,9 +13,11 @@ export class ShowViewCommand extends Command {
 			Commands.ShowCommitDetailsView,
 			Commands.ShowCommitsView,
 			Commands.ShowContributorsView,
+			Commands.ShowDraftsView,
 			Commands.ShowFileHistoryView,
 			Commands.ShowGraphView,
 			Commands.ShowHomeView,
+			Commands.ShowAccountView,
 			Commands.ShowLineHistoryView,
 			Commands.ShowRemotesView,
 			Commands.ShowRepositoriesView,
@@ -27,11 +30,11 @@ export class ShowViewCommand extends Command {
 		]);
 	}
 
-	protected override preExecute(context: CommandContext, ...args: any[]) {
+	protected override preExecute(context: CommandContext, ...args: unknown[]) {
 		return this.execute(context, ...args);
 	}
 
-	async execute(context: CommandContext, ...args: any[]) {
+	async execute(context: CommandContext, ...args: unknown[]) {
 		const command = context.command as Commands;
 		switch (command) {
 			case Commands.ShowBranchesView:
@@ -42,20 +45,16 @@ export class ShowViewCommand extends Command {
 				return this.container.commitsView.show();
 			case Commands.ShowContributorsView:
 				return this.container.contributorsView.show();
+			case Commands.ShowDraftsView:
+				return this.container.draftsView.show();
 			case Commands.ShowFileHistoryView:
 				return this.container.fileHistoryView.show();
 			case Commands.ShowHomeView:
 				return this.container.homeView.show();
 			case Commands.ShowAccountView:
 				return this.container.accountView.show();
-			case Commands.ShowGraphView: {
-				let commandArgs = args;
-				if (context.type === 'scm' && context.scm?.rootUri != null) {
-					const repo = this.container.git.getRepository(context.scm.rootUri);
-					commandArgs = repo != null ? [repo, ...args] : args;
-				}
-				return this.container.graphView.show(undefined, ...commandArgs);
-			}
+			case Commands.ShowGraphView:
+				return this.container.graphView.show(undefined, ...(args as GraphWebviewShowingArgs));
 			case Commands.ShowLineHistoryView:
 				return this.container.lineHistoryView.show();
 			case Commands.ShowRemotesView:

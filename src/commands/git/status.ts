@@ -8,7 +8,8 @@ import { GitCommandQuickPickItem } from '../../quickpicks/items/gitCommands';
 import { pad } from '../../system/string';
 import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
 import type { PartialStepState, StepGenerator, StepState } from '../quickCommand';
-import { endSteps, pickRepositoryStep, QuickCommand, showRepositoryStatusStep, StepResultBreak } from '../quickCommand';
+import { endSteps, QuickCommand, StepResultBreak } from '../quickCommand';
+import { pickRepositoryStep, showRepositoryStatusStep } from '../quickCommand.steps';
 
 interface Context {
 	repos: Repository[];
@@ -89,8 +90,7 @@ export class StatusGitCommand extends QuickCommand<State> {
 					refType: 'branch',
 					name: context.status.branch,
 					remote: false,
-					upstream:
-						context.status.upstream != null ? { name: context.status.upstream, missing: false } : undefined,
+					upstream: context.status.upstream,
 				}),
 				{ icon: false },
 			)}`;

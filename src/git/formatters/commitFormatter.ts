@@ -7,21 +7,19 @@ import type {
 	OpenPullRequestActionContext,
 } from '../../api/gitlens';
 import { getPresenceDataUri } from '../../avatars';
-import type { ShowQuickCommitCommandArgs } from '../../commands';
-import {
-	ConnectRemoteProviderCommand,
-	DiffWithCommand,
-	OpenCommitOnRemoteCommand,
-	OpenFileAtRevisionCommand,
-	ShowCommitsInViewCommand,
-	ShowQuickCommitFileCommand,
-} from '../../commands';
 import { Command } from '../../commands/base';
+import { DiffWithCommand } from '../../commands/diffWith';
+import { InspectCommand } from '../../commands/inspect';
+import { OpenCommitOnRemoteCommand } from '../../commands/openCommitOnRemote';
+import { OpenFileAtRevisionCommand } from '../../commands/openFileAtRevision';
+import { ConnectRemoteProviderCommand } from '../../commands/remoteProviders';
+import type { ShowQuickCommitCommandArgs } from '../../commands/showQuickCommit';
+import { ShowQuickCommitFileCommand } from '../../commands/showQuickCommitFile';
 import type { DateStyle } from '../../config';
 import { Commands, GlyphChars } from '../../constants';
 import { Container } from '../../container';
 import { emojify } from '../../emojis';
-import { arePlusFeaturesEnabled } from '../../plus/subscription/utils';
+import { arePlusFeaturesEnabled } from '../../plus/gk/utils';
 import type { ShowInCommitGraphCommandArgs } from '../../plus/webviews/graph/protocol';
 import { configuration } from '../../system/configuration';
 import { join, map } from '../../system/iterable';
@@ -31,12 +29,14 @@ import { encodeHtmlWeak, escapeMarkdown, getSuperscript } from '../../system/str
 import type { ContactPresence } from '../../vsls/vsls';
 import type { PreviousLineComparisonUrisResult } from '../gitProvider';
 import type { GitCommit } from '../models/commit';
-import { isCommit } from '../models/commit';
+import { isCommit, isStash } from '../models/commit';
 import { uncommitted, uncommittedStaged } from '../models/constants';
 import { getIssueOrPullRequestMarkdownIcon } from '../models/issue';
-import { PullRequest } from '../models/pullRequest';
+import type { PullRequest } from '../models/pullRequest';
+import { isPullRequest } from '../models/pullRequest';
 import { getReferenceFromRevision, isUncommittedStaged, shortenRevision } from '../models/reference';
-import { GitRemote } from '../models/remote';
+import type { GitRemote } from '../models/remote';
+import { getHighlanderProviders } from '../models/remote';
 import type { RemoteProvider } from '../remotes/remoteProvider';
 import type { FormatOptions, RequiredTokenOptions } from './formatter';
 import { Formatter } from './formatter';
@@ -158,14 +158,14 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 
 	private get _pullRequestDate() {
 		const { pullRequest: pr } = this._options;
-		if (pr == null || !PullRequest.is(pr)) return '';
+		if (pr == null || !isPullRequest(pr)) return '';
 
 		return pr.formatDate(this._options.dateFormat) ?? '';
 	}
 
 	private get _pullRequestDateAgo() {
 		const { pullRequest: pr } = this._options;
-		if (pr == null || !PullRequest.is(pr)) return '';
+		if (pr == null || !isPullRequest(pr)) return '';
 
 		return pr.formatDateFromNow() ?? '';
 	}
@@ -365,12 +365,12 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 			const { previousLineComparisonUris: diffUris } = this._options;
 			if (diffUris?.previous != null) {
 				commands = `[\`${this._padOrTruncate(
-					shortenRevision(isUncommittedStaged(diffUris.current.sha) ? diffUris.current.sha : uncommitted)!,
+					shortenRevision(isUncommittedStaged(diffUris.current.sha) ? diffUris.current.sha : uncommitted),
 					this._options.tokenOptions.commands,
-				)}\`](${ShowCommitsInViewCommand.getMarkdownCommandArgs(
+				)}\`](${InspectCommand.getMarkdownCommandArgs(
 					this._item.sha,
 					this._item.repoPath,
-				)} "Open Details")`;
+				)} "Inspect Commit Details")`;
 
 				commands += ` &nbsp;[$(chevron-left)$(compare-changes)](${DiffWithCommand.getMarkdownCommandArgs({
 					lhs: {
@@ -392,12 +392,12 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 				)} "Open Blame Prior to this Change")`;
 			} else {
 				commands = `[\`${this._padOrTruncate(
-					shortenRevision(this._item.isUncommittedStaged ? uncommittedStaged : uncommitted)!,
+					shortenRevision(this._item.isUncommittedStaged ? uncommittedStaged : uncommitted),
 					this._options.tokenOptions.commands,
-				)}\`](${ShowCommitsInViewCommand.getMarkdownCommandArgs(
+				)}\`](${InspectCommand.getMarkdownCommandArgs(
 					this._item.sha,
 					this._item.repoPath,
-				)} "Open Details")`;
+				)} "Inspect Commit Details")`;
 			}
 
 			return commands;
@@ -405,10 +405,10 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 
 		const separator = ' &nbsp;&nbsp;|&nbsp;&nbsp; ';
 
-		commands = `---\n\n[\`$(git-commit) ${this.id}\`](${ShowCommitsInViewCommand.getMarkdownCommandArgs(
+		commands = `---\n\n[\`$(git-commit) ${this.id}\`](${InspectCommand.getMarkdownCommandArgs(
 			this._item.sha,
 			this._item.repoPath,
-		)} "Open Details")`;
+		)} "Inspect Commit Details")`;
 
 		commands += ` &nbsp;[$(chevron-left)$(compare-changes)](${DiffWithCommand.getMarkdownCommandArgs(
 			this._item,
@@ -440,14 +440,15 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 		if (arePlusFeaturesEnabled()) {
 			commands += ` &nbsp;[$(gitlens-graph)](${Command.getMarkdownCommandArgsCore<ShowInCommitGraphCommandArgs>(
 				Commands.ShowInCommitGraph,
-				{ ref: getReferenceFromRevision(this._item) },
+				// Avoid including the message here, it just bloats the command url
+				{ ref: getReferenceFromRevision(this._item, { excludeMessage: true }) },
 			)} "Open in Commit Graph")`;
 		}
 
 		const { pullRequest: pr, remotes } = this._options;
 
 		if (remotes?.length) {
-			const providers = GitRemote.getHighlanderProviders(remotes);
+			const providers = getHighlanderProviders(remotes);
 
 			commands += ` &nbsp;[$(globe)](${OpenCommitOnRemoteCommand.getMarkdownCommandArgs(
 				this._item.sha,
@@ -455,7 +456,7 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 		}
 
 		if (pr != null) {
-			if (PullRequest.is(pr)) {
+			if (isPullRequest(pr)) {
 				commands += `${separator}[$(git-pull-request) PR #${
 					pr.id
 				}](${getMarkdownActionCommand<OpenPullRequestActionContext>('openPullRequest', {
@@ -473,8 +474,8 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 		} else if (remotes != null) {
 			const [remote] = remotes;
 			if (
-				remote?.hasRichIntegration() &&
-				!remote.provider.maybeConnected &&
+				remote?.hasIntegration() &&
+				!remote.maybeIntegrationConnected &&
 				configuration.get('integrations.enabled')
 			) {
 				commands += `${separator}[$(plug) Connect to ${remote?.provider.name}${
@@ -584,28 +585,41 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 	}
 
 	get link(): string {
+		let icon;
+		let label;
+		if (isStash(this._item)) {
+			icon = 'archive';
+			label = this._padOrTruncate(
+				`Stash${this._item.number ? ` #${this._item.number}` : ''}`,
+				this._options.tokenOptions.link,
+			);
+		} else {
+			icon = this._item.sha != null && !this._item.isUncommitted ? 'git-commit' : '';
+			label = this._padOrTruncate(
+				shortenRevision(this._item.sha ?? '', { strings: { working: 'Working Tree' } }),
+				this._options.tokenOptions.id,
+			);
+		}
+
 		let link;
 		switch (this._options.outputFormat) {
-			case 'markdown': {
-				const sha = this._padOrTruncate(this._item.shortSha ?? '', this._options.tokenOptions.id);
-				link = `[\`$(git-commit) ${sha}\`](${ShowCommitsInViewCommand.getMarkdownCommandArgs(
-					this._item.sha,
-					this._item.repoPath,
-				)} "Open Details")`;
+			case 'markdown':
+				icon = icon ? `$(${icon}) ` : '';
+				link = `[\`${icon}${label}\`](${InspectCommand.getMarkdownCommandArgs({
+					ref: getReferenceFromRevision(this._item),
+				})} "Inspect Commit Details")`;
 				break;
-			}
-			case 'html': {
-				const sha = this._padOrTruncate(this._item.shortSha ?? '', this._options.tokenOptions.id);
-				link = /*html*/ `<a href="${ShowCommitsInViewCommand.getMarkdownCommandArgs(
-					this._item.sha,
-					this._item.repoPath,
-				)}" title="Open Details"${
+			case 'html':
+				icon = icon ? `<span class="codicon codicon-${icon}"></span>` : '';
+				link = /*html*/ `<a href="${InspectCommand.getMarkdownCommandArgs({
+					ref: getReferenceFromRevision(this._item),
+				})}" title="Inspect Commit Details"${
 					this._options.htmlFormat?.classes?.link ? ` class="${this._options.htmlFormat.classes.link}"` : ''
-				}><span class="codicon codicon-git-commit"></span>${sha}</a>`;
+				}>${icon}${label}</a>`;
 				break;
-			}
 			default:
-				return this.id;
+				link = this.id;
+				break;
 		}
 
 		return this._padOrTruncate(link, this._options.tokenOptions.link);
@@ -689,7 +703,7 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 		}
 
 		let text;
-		if (PullRequest.is(pr)) {
+		if (isPullRequest(pr)) {
 			if (this._options.outputFormat === 'markdown') {
 				text = `PR [**#${pr.id}**](${getMarkdownActionCommand<OpenPullRequestActionContext>('openPullRequest', {
 					repoPath: this._item.repoPath,
@@ -752,7 +766,7 @@ export class CommitFormatter extends Formatter<GitCommit, CommitFormatOptions> {
 	get pullRequestState(): string {
 		const { pullRequest: pr } = this._options;
 		return this._padOrTruncate(
-			pr == null || !PullRequest.is(pr) ? '' : pr.state ?? '',
+			pr == null || !isPullRequest(pr) ? '' : pr.state ?? '',
 			this._options.tokenOptions.pullRequestState,
 		);
 	}

@@ -11,17 +11,18 @@ import type { GitBranchReference, GitRevisionReference } from '../git/models/ref
 import { getReferenceLabel } from '../git/models/reference';
 import type { GitRemote } from '../git/models/remote';
 import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { BranchNode } from './nodes/branchNode';
 import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode';
 import { RemoteNode } from './nodes/remoteNode';
 import { RemotesNode } from './nodes/remotesNode';
 import { RepositoryNode } from './nodes/repositoryNode';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
 
@@ -48,9 +49,16 @@ export class RemotesRepositoryNode extends RepositoryFolderNode<RemotesView, Rem
 export class RemotesViewNode extends RepositoriesSubscribeableNode<RemotesView, RemotesRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let repositories = this.view.container.git.openRepositories;
+			if (configuration.get('views.collapseWorktreesWhenPossible')) {
+				const grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No remotes could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading remotes...'
+					: 'No remotes could be found.';
 
 				return [];
 			}
@@ -102,6 +110,10 @@ export class RemotesView extends ViewBase<'remotes', RemotesViewNode, RemotesVie
 
 	override get canReveal(): boolean {
 		return this.config.reveal || !configuration.get('views.repositories.showRemotes');
+	}
+
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
 	}
 
 	protected getRoot() {
@@ -169,7 +181,9 @@ export class RemotesView extends ViewBase<'remotes', RemotesViewNode, RemotesVie
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
 			!configuration.changed(e, 'defaultTimeFormat') &&
 			!configuration.changed(e, 'integrations.enabled') &&
-			!configuration.changed(e, 'sortBranchesBy')
+			!configuration.changed(e, 'sortBranchesBy') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 		) {
 			return false;
 		}
@@ -209,6 +223,7 @@ export class RemotesView extends ViewBase<'remotes', RemotesViewNode, RemotesVie
 		const branches = await this.container.git.getCommitBranches(
 			commit.repoPath,
 			commit.ref,
+			undefined,
 			isCommit(commit) ? { commitDate: commit.committer.date, remotes: true } : { remotes: true },
 		);
 		if (branches.length === 0) return undefined;

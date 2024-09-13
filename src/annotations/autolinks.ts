@@ -6,15 +6,17 @@ import type { Container } from '../container';
 import type { IssueOrPullRequest } from '../git/models/issue';
 import { getIssueOrPullRequestHtmlIcon, getIssueOrPullRequestMarkdownIcon } from '../git/models/issue';
 import type { GitRemote } from '../git/models/remote';
-import type { RemoteProviderReference } from '../git/models/remoteProvider';
-import type { RichRemoteProvider } from '../git/remotes/richRemoteProvider';
-import type { MaybePausedResult } from '../system/cancellation';
+import type { ProviderReference } from '../git/models/remoteProvider';
+import type { ResourceDescriptor } from '../plus/integrations/integration';
+import type { IntegrationId } from '../plus/integrations/providers/models';
+import { IssueIntegrationId } from '../plus/integrations/providers/models';
 import { configuration } from '../system/configuration';
 import { fromNow } from '../system/date';
 import { debug } from '../system/decorators/log';
 import { encodeUrl } from '../system/encoding';
 import { join, map } from '../system/iterable';
 import { Logger } from '../system/logger';
+import type { MaybePausedResult } from '../system/promise';
 import { capitalize, encodeHtmlWeak, escapeMarkdown, escapeRegex, getSuperscript } from '../system/string';
 
 const emptyAutolinkMap = Object.freeze(new Map<string, Autolink>());
@@ -22,7 +24,7 @@ const emptyAutolinkMap = Object.freeze(new Map<string, Autolink>());
 const numRegex = /<num>/g;
 
 export interface Autolink {
-	provider?: RemoteProviderReference;
+	provider?: ProviderReference;
 	id: string;
 	prefix: string;
 	title?: string;
@@ -30,6 +32,18 @@ export interface Autolink {
 
 	type?: AutolinkType;
 	description?: string;
+
+	descriptor?: ResourceDescriptor;
+	tokenize?:
+		| ((
+				text: string,
+				outputFormat: 'html' | 'markdown' | 'plaintext',
+				tokenMapping: Map<string, string>,
+				enrichedAutolinks?: Map<string, MaybeEnrichedAutolink>,
+				prs?: Set<string>,
+				footnotes?: Map<number, string>,
+		  ) => string)
+		| null;
 }
 
 export type EnrichedAutolink = [
@@ -58,6 +72,7 @@ export function serializeAutolink(value: Autolink): Autolink {
 		url: value.url,
 		type: value.type,
 		description: value.description,
+		descriptor: value.descriptor,
 	};
 	return serialized;
 }
@@ -92,6 +107,8 @@ export interface DynamicAutolinkReference {
 		| null;
 	parse: (text: string, autolinks: Map<string, Autolink>) => void;
 }
+
+export const supportedAutolinkIntegrations = [IssueIntegrationId.Jira];
 
 function isDynamic(ref: AutolinkReference | DynamicAutolinkReference): ref is DynamicAutolinkReference {
 	return !('prefix' in ref) && !('url' in ref);
@@ -133,27 +150,61 @@ export class Autolinks implements Disposable {
 						ignoreCase: a.ignoreCase,
 						type: a.type,
 						description: a.description,
+						descriptor: a.descriptor,
 					})) ?? [];
 		}
 	}
 
-	getAutolinks(message: string, remote?: GitRemote): Map<string, Autolink>;
-	// eslint-disable-next-line @typescript-eslint/unified-signatures
-	getAutolinks(message: string, remote: GitRemote, options?: { excludeCustom?: boolean }): Map<string, Autolink>;
+	async getAutolinks(message: string, remote?: GitRemote): Promise<Map<string, Autolink>>;
+	async getAutolinks(
+		message: string,
+		remote: GitRemote,
+		// eslint-disable-next-line @typescript-eslint/unified-signatures
+		options?: { excludeCustom?: boolean },
+	): Promise<Map<string, Autolink>>;
 	@debug<Autolinks['getAutolinks']>({
 		args: {
 			0: '<message>',
 			1: false,
 		},
 	})
-	getAutolinks(message: string, remote?: GitRemote, options?: { excludeCustom?: boolean }): Map<string, Autolink> {
+	async getAutolinks(
+		message: string,
+		remote?: GitRemote,
+		options?: { excludeCustom?: boolean },
+	): Promise<Map<string, Autolink>> {
 		const refsets: [
-			RemoteProviderReference | undefined,
+			ProviderReference | undefined,
 			(AutolinkReference | DynamicAutolinkReference)[] | CacheableAutolinkReference[],
 		][] = [];
-		if (remote?.provider?.autolinks?.length) {
-			refsets.push([remote.provider, remote.provider.autolinks]);
+		// Connected integration autolinks
+		await Promise.allSettled(
+			supportedAutolinkIntegrations.map(async integrationId => {
+				const integration = await this.container.integrations.get(integrationId);
+				const autoLinks = await integration.autolinks();
+				if (autoLinks.length) {
+					refsets.push([integration, autoLinks]);
+				}
+			}),
+		);
+
+		// Remote-specific autolinks and remote integration autolinks
+		if (remote?.provider != null) {
+			const autoLinks = [];
+			const integrationAutolinks = await (await remote.getIntegration())?.autolinks();
+			if (integrationAutolinks?.length) {
+				autoLinks.push(...integrationAutolinks);
+			}
+			if (remote?.provider?.autolinks.length) {
+				autoLinks.push(...remote.provider.autolinks);
+			}
+
+			if (autoLinks.length) {
+				refsets.push([remote.provider, autoLinks]);
+			}
 		}
+
+		// Custom-configured autolinks
 		if (this._references.length && (remote?.provider == null || !options?.excludeCustom)) {
 			refsets.push([undefined, this._references]);
 		}
@@ -189,12 +240,22 @@ export class Autolinks implements Disposable {
 
 						type: ref.type,
 						description: ref.description?.replace(numRegex, num),
+						descriptor: ref.descriptor,
 					});
 				} while (true);
 			}
 		}
 
 		return autolinks;
+	}
+
+	getAutolinkEnrichableId(autolink: Autolink): string {
+		switch (autolink.provider?.id) {
+			case IssueIntegrationId.Jira:
+				return `${autolink.prefix}${autolink.id}`;
+			default:
+				return autolink.id;
+		}
 	}
 
 	async getEnrichedAutolinks(
@@ -217,36 +278,42 @@ export class Autolinks implements Disposable {
 		remote: GitRemote | undefined,
 	): Promise<Map<string, EnrichedAutolink> | undefined> {
 		if (typeof messageOrAutolinks === 'string') {
-			messageOrAutolinks = this.getAutolinks(messageOrAutolinks, remote);
+			messageOrAutolinks = await this.getAutolinks(messageOrAutolinks, remote);
 		}
 		if (messageOrAutolinks.size === 0) return undefined;
 
-		let provider: RichRemoteProvider | undefined;
-		if (remote?.hasRichIntegration()) {
-			({ provider } = remote);
-			const connected = remote.provider.maybeConnected ?? (await remote.provider.isConnected());
+		let integration = await remote?.getIntegration();
+		if (integration != null) {
+			const connected = integration.maybeConnected ?? (await integration.isConnected());
 			if (!connected) {
-				provider = undefined;
+				integration = undefined;
 			}
 		}
 
-		return new Map(
-			map(
-				messageOrAutolinks,
-				([id, link]) =>
-					[
-						id,
-						[
-							provider != null &&
-							link.provider?.id === provider.id &&
-							link.provider?.domain === provider.domain
-								? provider.getIssueOrPullRequest(id)
-								: undefined,
-							link,
-						] satisfies EnrichedAutolink,
-					] as const,
-			),
-		);
+		const enrichedAutolinks = new Map<string, EnrichedAutolink>();
+		for (const [id, link] of messageOrAutolinks) {
+			let linkIntegration = link.provider
+				? await this.container.integrations.get(link.provider.id as IntegrationId)
+				: undefined;
+			if (linkIntegration != null) {
+				const connected = linkIntegration.maybeConnected ?? (await linkIntegration.isConnected());
+				if (!connected) {
+					linkIntegration = undefined;
+				}
+			}
+			const issueOrPullRequestPromise =
+				remote?.provider != null &&
+				integration != null &&
+				link.provider?.id === integration.id &&
+				link.provider?.domain === integration.domain
+					? integration.getIssueOrPullRequest(link.descriptor ?? remote.provider.repoDesc, id)
+					: link.descriptor != null
+					  ? linkIntegration?.getIssueOrPullRequest(link.descriptor, this.getAutolinkEnrichableId(link))
+					  : undefined;
+			enrichedAutolinks.set(id, [issueOrPullRequestPromise, link]);
+		}
+
+		return enrichedAutolinks;
 	}
 
 	@debug<Autolinks['linkify']>({
@@ -272,27 +339,44 @@ export class Autolinks implements Disposable {
 
 		const tokenMapping = new Map<string, string>();
 
-		for (const ref of this._references) {
-			if (this.ensureAutolinkCached(ref)) {
-				if (ref.tokenize != null) {
-					text = ref.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
+		if (enrichedAutolinks?.size) {
+			for (const [, [, link]] of enrichedAutolinks) {
+				if (this.ensureAutolinkCached(link)) {
+					if (link.tokenize != null) {
+						text = link.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
+					}
 				}
 			}
-		}
+		} else {
+			for (const ref of this._references) {
+				if (this.ensureAutolinkCached(ref)) {
+					if (ref.tokenize != null) {
+						text = ref.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
+					}
+				}
+			}
 
-		if (remotes != null && remotes.length !== 0) {
-			remotes = [...remotes].sort((a, b) => {
-				const aConnected = a.provider?.maybeConnected;
-				const bConnected = b.provider?.maybeConnected;
-				return aConnected !== bConnected ? (aConnected ? -1 : bConnected ? 1 : 0) : 0;
-			});
-			for (const r of remotes) {
-				if (r.provider == null) continue;
+			if (remotes != null && remotes.length !== 0) {
+				remotes = [...remotes].sort((a, b) => {
+					const aConnected = a.maybeIntegrationConnected;
+					const bConnected = b.maybeIntegrationConnected;
+					return aConnected !== bConnected ? (aConnected ? -1 : bConnected ? 1 : 0) : 0;
+				});
+				for (const r of remotes) {
+					if (r.provider == null) continue;
 
-				for (const ref of r.provider.autolinks) {
-					if (this.ensureAutolinkCached(ref)) {
-						if (ref.tokenize != null) {
-							text = ref.tokenize(text, outputFormat, tokenMapping, enrichedAutolinks, prs, footnotes);
+					for (const ref of r.provider.autolinks) {
+						if (this.ensureAutolinkCached(ref)) {
+							if (ref.tokenize != null) {
+								text = ref.tokenize(
+									text,
+									outputFormat,
+									tokenMapping,
+									enrichedAutolinks,
+									prs,
+									footnotes,
+								);
+							}
 						}
 					}
 				}
@@ -315,8 +399,8 @@ export class Autolinks implements Disposable {
 	}
 
 	private ensureAutolinkCached(
-		ref: CacheableAutolinkReference | DynamicAutolinkReference,
-	): ref is CacheableAutolinkReference | DynamicAutolinkReference {
+		ref: CacheableAutolinkReference | DynamicAutolinkReference | Autolink,
+	): ref is CacheableAutolinkReference | DynamicAutolinkReference | Autolink {
 		if (isDynamic(ref)) return true;
 		if (!ref.prefix || !ref.url) return false;
 		if (ref.tokenize !== undefined || ref.tokenize === null) return true;
@@ -374,7 +458,7 @@ export class Autolinks implements Disposable {
 													)} **${issueTitle}**](${url}${title}")\\\n${GlyphChars.Space.repeat(
 														5,
 													)}${linkText} ${issue.state} ${fromNow(
-														issue.closedDate ?? issue.date,
+														issue.closedDate ?? issue.createdDate,
 													)}`,
 												);
 											}
@@ -382,7 +466,7 @@ export class Autolinks implements Disposable {
 											title += `\n${GlyphChars.Dash.repeat(
 												2,
 											)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
-												issue.closedDate ?? issue.date,
+												issue.closedDate ?? issue.createdDate,
 											)}`;
 										}
 									} else if (footnotes != null && !prs?.has(num)) {
@@ -446,7 +530,7 @@ export class Autolinks implements Disposable {
 													)} <b>${issueTitle}</b></a><br /><span>${GlyphChars.Space.repeat(
 														5,
 													)}${linkText} ${issue.state} ${fromNow(
-														issue.closedDate ?? issue.date,
+														issue.closedDate ?? issue.createdDate,
 													)}</span>`,
 												);
 											}
@@ -454,7 +538,7 @@ export class Autolinks implements Disposable {
 											title += `\n${GlyphChars.Dash.repeat(
 												2,
 											)}\n${issueTitleQuoteEscaped}\n${capitalize(issue.state)}, ${fromNow(
-												issue.closedDate ?? issue.date,
+												issue.closedDate ?? issue.createdDate,
 											)}`;
 										}
 									} else if (footnotes != null && !prs?.has(num)) {
@@ -495,7 +579,7 @@ export class Autolinks implements Disposable {
 												: `${issueResult.value.title}  ${GlyphChars.Dot}  ${capitalize(
 														issueResult.value.state,
 												  )}, ${fromNow(
-														issueResult.value.closedDate ?? issueResult.value.date,
+														issueResult.value.closedDate ?? issueResult.value.createdDate,
 												  )}`
 										}`,
 									);

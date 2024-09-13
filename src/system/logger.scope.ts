@@ -1,12 +1,14 @@
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+import { getScopedCounter } from './counter';
+
+export const logScopeIdGenerator = getScopedCounter();
 
 const scopes = new Map<number, LogScope>();
-let scopeCounter = 0;
 
 export interface LogScope {
 	readonly scopeId?: number;
 	readonly prefix: string;
 	exitDetails?: string;
+	exitFailed?: string;
 }
 
 export function clearLogScope(scopeId: number) {
@@ -14,34 +16,28 @@ export function clearLogScope(scopeId: number) {
 }
 
 export function getLogScope(): LogScope | undefined {
-	return scopes.get(scopeCounter);
+	return scopes.get(logScopeIdGenerator.current);
 }
 
-export function getNewLogScope(prefix: string): LogScope {
-	const scopeId = getNextLogScopeId();
+export function getNewLogScope(prefix: string, scope?: LogScope | undefined): LogScope {
+	if (scope != null) return { scopeId: scope.scopeId, prefix: `${scope.prefix}${prefix}` };
+
+	const scopeId = logScopeIdGenerator.next();
 	return {
 		scopeId: scopeId,
 		prefix: `[${String(scopeId).padStart(5)}] ${prefix}`,
 	};
 }
 
-export function getLogScopeId(): number {
-	return scopeCounter;
-}
-
-export function getNextLogScopeId(): number {
-	if (scopeCounter === maxSmallIntegerV8) {
-		scopeCounter = 0;
-	}
-	return ++scopeCounter;
-}
-
 export function setLogScope(scopeId: number, scope: LogScope) {
 	scopes.set(scopeId, scope);
 }
 
-export function setLogScopeExit(scope: LogScope | undefined, details: string): void {
+export function setLogScopeExit(scope: LogScope | undefined, details: string | undefined, failed?: string): void {
 	if (scope == null) return;
 
 	scope.exitDetails = details;
+	if (failed != null) {
+		scope.exitFailed = failed;
+	}
 }

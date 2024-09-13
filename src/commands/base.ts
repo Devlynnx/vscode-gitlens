@@ -14,16 +14,20 @@ import type { GitBranch } from '../git/models/branch';
 import { isBranch } from '../git/models/branch';
 import type { GitCommit, GitStashCommit } from '../git/models/commit';
 import { isCommit } from '../git/models/commit';
-import { GitContributor } from '../git/models/contributor';
+import type { GitContributor } from '../git/models/contributor';
+import { isContributor } from '../git/models/contributor';
 import type { GitFile } from '../git/models/file';
 import type { GitReference } from '../git/models/reference';
-import { GitRemote } from '../git/models/remote';
+import type { GitRemote } from '../git/models/remote';
+import { isRemote } from '../git/models/remote';
 import { Repository } from '../git/models/repository';
 import type { GitTag } from '../git/models/tag';
 import { isTag } from '../git/models/tag';
+import { CloudWorkspace, LocalWorkspace } from '../plus/workspaces/models';
 import { registerCommand } from '../system/command';
 import { sequentialize } from '../system/function';
-import { ViewNode, ViewRefFileNode, ViewRefNode } from '../views/nodes/viewNode';
+import { ViewNode } from '../views/nodes/abstract/viewNode';
+import { ViewRefFileNode, ViewRefNode } from '../views/nodes/abstract/viewRefNode';
 
 export function getCommandUri(uri?: Uri, editor?: TextEditor): Uri | undefined {
 	// Always use the editor.uri (if we have one), so we are correct for a split diff
@@ -124,7 +128,7 @@ export function isCommandContextViewNodeHasContributor(
 ): context is CommandViewNodeContext & { node: ViewNode & { contributor: GitContributor } } {
 	if (context.type !== 'viewItem') return false;
 
-	return GitContributor.is((context.node as ViewNode & { contributor: GitContributor }).contributor);
+	return isContributor((context.node as ViewNode & { contributor: GitContributor }).contributor);
 }
 
 export function isCommandContextViewNodeHasFile(
@@ -185,7 +189,7 @@ export function isCommandContextViewNodeHasRemote(
 ): context is CommandViewNodeContext & { node: ViewNode & { remote: GitRemote } } {
 	if (context.type !== 'viewItem') return false;
 
-	return GitRemote.is((context.node as ViewNode & { remote: GitRemote }).remote);
+	return isRemote((context.node as ViewNode & { remote: GitRemote }).remote);
 }
 
 export function isCommandContextViewNodeHasRepository(
@@ -212,6 +216,14 @@ export function isCommandContextViewNodeHasTag(
 	return isTag((context.node as ViewNode & { tag: GitTag }).tag);
 }
 
+export function isCommandContextViewNodeHasWorkspace(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { workspace: CloudWorkspace | LocalWorkspace } } {
+	if (context.type !== 'viewItem') return false;
+	const workspace = (context.node as ViewNode & { workspace?: CloudWorkspace | LocalWorkspace }).workspace;
+	return workspace instanceof CloudWorkspace || workspace instanceof LocalWorkspace;
+}
+
 export type CommandContext =
 	| CommandEditorLineContext
 	| CommandGitTimelineItemContext
@@ -225,7 +237,7 @@ export type CommandContext =
 	| CommandViewNodeContext
 	| CommandViewNodesContext;
 
-function isScm(scm: any): scm is SourceControl {
+export function isScm(scm: any): scm is SourceControl {
 	if (scm == null) return false;
 
 	return (
@@ -275,7 +287,8 @@ export abstract class Command implements Disposable {
 		command: Commands | `${Commands.ActionPrefix}${ActionContext['type']}`,
 		args: T,
 	): string {
-		return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
+		// Since we are using the command in a markdown link, we need to escape ()'s so they don't get interpreted as markdown
+		return `command:${command}?${encodeURIComponent(JSON.stringify(args)).replace(/([()])/g, '\\$1')}`;
 	}
 
 	protected readonly contextParsingOptions: CommandContextParsingOptions = { expectsEditor: false };

@@ -9,8 +9,11 @@ import { shortenRevision } from '../git/models/reference';
 import { showCommitHasNoPreviousCommitWarningMessage, showGenericErrorMessage } from '../messages';
 import { showCommitPicker } from '../quickpicks/commitPicker';
 import { CommandQuickPickItem } from '../quickpicks/items/common';
+import type { DirectiveQuickPickItem } from '../quickpicks/items/directive';
+import { createDirectiveQuickPickItem, Directive } from '../quickpicks/items/directive';
 import { command } from '../system/command';
 import { Logger } from '../system/logger';
+import { splitPath } from '../system/path';
 import { pad } from '../system/string';
 import type { CommandContext } from './base';
 import { ActiveEditorCommand, getCommandUri } from './base';
@@ -124,33 +127,89 @@ export class OpenFileAtRevisionCommand extends ActiveEditorCommand {
 					2,
 					2,
 				)}`;
+				const titleWithContext = `${title}${gitUri.getFormattedFileName({
+					suffix: gitUri.sha ? `:${shortenRevision(gitUri.sha)}` : undefined,
+					truncateTo: quickPickTitleMaxChars - title.length,
+				})}`;
 				const pick = await showCommitPicker(
 					log,
-					`${title}${gitUri.getFormattedFileName({
-						suffix: gitUri.sha ? `:${shortenRevision(gitUri.sha)}` : undefined,
-						truncateTo: quickPickTitleMaxChars - title.length,
-					})}`,
+					titleWithContext,
 					`Choose a commit to ${args.annotationType === 'blame' ? 'blame' : 'open'} the file revision from`,
 					{
+						empty: !gitUri.sha
+							? {
+									getState: async () => {
+										const items: (CommandQuickPickItem | DirectiveQuickPickItem)[] = [];
+
+										const status = await this.container.git.getStatusForRepo(gitUri.repoPath);
+										if (status != null) {
+											for (const f of status.files) {
+												if (f.workingTreeStatus === '?' || f.workingTreeStatus === '!') {
+													continue;
+												}
+
+												const [label, description] = splitPath(f.path, undefined, true);
+
+												items.push(
+													new CommandQuickPickItem<[Uri]>(
+														{
+															label: label,
+															description: description,
+														},
+														undefined,
+														Commands.OpenFileAtRevision,
+														[this.container.git.getAbsoluteUri(f.path, gitUri.repoPath)],
+													),
+												);
+											}
+										}
+
+										let newPlaceholder;
+										let newTitle;
+
+										if (items.length) {
+											newPlaceholder = `${gitUri.getFormattedFileName()} is likely untracked, choose a different file?`;
+											newTitle = `${titleWithContext} (Untracked?)`;
+										} else {
+											newPlaceholder = 'No commits found';
+										}
+
+										items.push(
+											createDirectiveQuickPickItem(Directive.Cancel, undefined, {
+												label: items.length ? 'Cancel' : 'OK',
+											}),
+										);
+
+										return {
+											items: items,
+											placeholder: newPlaceholder,
+											title: newTitle,
+										};
+									},
+							  }
+							: undefined,
 						picked: gitUri.sha,
-						keys: ['right', 'alt+right', 'ctrl+right'],
-						onDidPressKey: async (key, item) => {
-							await openFileAtRevision(item.item.file!, item.item, {
-								annotationType: args!.annotationType,
-								line: args!.line,
-								preserveFocus: true,
-								preview: false,
-							});
+						keyboard: {
+							keys: ['right', 'alt+right', 'ctrl+right'],
+							onDidPressKey: async (key, item) => {
+								await openFileAtRevision(item.item.file!, item.item, {
+									annotationType: args.annotationType,
+									line: args.line,
+									preserveFocus: true,
+									preview: true,
+								});
+							},
 						},
 						showOtherReferences: [
-							CommandQuickPickItem.fromCommand(
+							CommandQuickPickItem.fromCommand<[Uri]>(
 								'Choose a Branch or Tag...',
 								Commands.OpenFileAtRevisionFrom,
+								[uri],
 							),
-							CommandQuickPickItem.fromCommand<OpenFileAtRevisionFromCommandArgs>(
+							CommandQuickPickItem.fromCommand<[Uri, OpenFileAtRevisionFromCommandArgs]>(
 								'Choose a Stash...',
 								Commands.OpenFileAtRevisionFrom,
-								{ stash: true },
+								[uri, { stash: true }],
 							),
 						],
 					},

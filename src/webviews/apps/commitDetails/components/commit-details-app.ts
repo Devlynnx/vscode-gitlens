@@ -1,20 +1,70 @@
-import type { TemplateResult } from 'lit';
+import { Badge, defineGkElement } from '@gitkraken/shared-web-components';
 import { html, LitElement, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { when } from 'lit/directives/when.js';
-import type { Autolink } from '../../../../annotations/autolinks';
-import type { IssueOrPullRequest } from '../../../../git/models/issue';
-import type { PullRequestShape } from '../../../../git/models/pullRequest';
-import type { HierarchicalItem } from '../../../../system/array';
-import { makeHierarchical } from '../../../../system/array';
+import type { ViewFilesLayout } from '../../../../config';
 import type { Serialized } from '../../../../system/serialize';
-import type { State } from '../../../commitDetails/protocol';
-import { messageHeadlineSplitterToken } from '../../../commitDetails/protocol';
-import { uncommittedSha } from '../commitDetails';
+import { pluralize } from '../../../../system/string';
+import type { DraftState, ExecuteCommitActionsParams, Mode, State } from '../../../commitDetails/protocol';
+import {
+	ChangeReviewModeCommand,
+	CreatePatchFromWipCommand,
+	DidChangeConnectedJiraNotification,
+	DidChangeDraftStateNotification,
+	DidChangeHasAccountNotification,
+	DidChangeNotification,
+	DidChangeWipStateNotification,
+	ExecuteCommitActionCommand,
+	ExecuteFileActionCommand,
+	ExplainRequest,
+	FetchCommand,
+	GenerateRequest,
+	NavigateCommand,
+	OpenFileCommand,
+	OpenFileComparePreviousCommand,
+	OpenFileCompareWorkingCommand,
+	OpenFileOnRemoteCommand,
+	OpenPullRequestChangesCommand,
+	OpenPullRequestComparisonCommand,
+	OpenPullRequestDetailsCommand,
+	OpenPullRequestOnRemoteCommand,
+	PickCommitCommand,
+	PinCommand,
+	PublishCommand,
+	PullCommand,
+	PushCommand,
+	SearchCommitCommand,
+	ShowCodeSuggestionCommand,
+	StageFileCommand,
+	SuggestChangesCommand,
+	SwitchCommand,
+	SwitchModeCommand,
+	UnstageFileCommand,
+	UpdatePreferencesCommand,
+} from '../../../commitDetails/protocol';
+import type { IpcMessage } from '../../../protocol';
+import { ExecuteCommand } from '../../../protocol';
+import type { CreatePatchMetadataEventDetail } from '../../plus/patchDetails/components/gl-patch-create';
+import type { IssuePullRequest } from '../../shared/components/rich/issue-pull-request';
+import type { WebviewPane, WebviewPaneExpandedChangeEventDetail } from '../../shared/components/webview-pane';
+import type { Disposable } from '../../shared/dom';
+import { DOM } from '../../shared/dom';
+import { assertsSerialized, HostIpc } from '../../shared/ipc';
+import type { GlCommitDetails } from './gl-commit-details';
+import type { FileChangeListItemDetail } from './gl-details-base';
+import type { GlInspectNav } from './gl-inspect-nav';
+import type { CreatePatchEventDetail, GenerateState } from './gl-inspect-patch';
+import type { GlWipDetails } from './gl-wip-details';
+import '../../shared/components/code-icon';
+import '../../shared/components/indicators/indicator';
+import '../../shared/components/overlays/tooltip';
+import '../../shared/components/pills/tracking';
+import './gl-commit-details';
+import './gl-wip-details';
+import './gl-inspect-nav';
+import './gl-status-nav';
 
-type Files = NonNullable<NonNullable<State['selected']>['files']>;
-type File = Files[0];
+export const uncommittedSha = '0000000000000000000000000000000000000000';
 
 interface ExplainState {
 	cancelled?: boolean;
@@ -27,22 +77,61 @@ export class GlCommitDetailsApp extends LitElement {
 	@property({ type: Object })
 	state?: Serialized<State>;
 
-	@state()
-	explainBusy = false;
-
 	@property({ type: Object })
 	explain?: ExplainState;
 
+	@property({ type: Object })
+	generate?: GenerateState;
+
+	@state()
+	draftState: DraftState = { inReview: false };
+
+	@state()
 	get isUncommitted() {
-		return this.state?.selected?.sha === uncommittedSha;
+		return this.state?.commit?.sha === uncommittedSha;
 	}
 
+	get hasCommit() {
+		return this.state?.commit != null;
+	}
+
+	@state()
 	get isStash() {
-		return this.state?.selected?.stashNumber != null;
+		return this.state?.commit?.stashNumber != null;
 	}
 
-	get shortSha() {
-		return this.state?.selected?.shortSha ?? '';
+	get wipStatus() {
+		const wip = this.state?.wip;
+		if (wip == null) return undefined;
+
+		const branch = wip.branch;
+		if (branch == null) return undefined;
+
+		const changes = wip.changes;
+		const working = changes?.files.length ?? 0;
+		const ahead = branch.tracking?.ahead ?? 0;
+		const behind = branch.tracking?.behind ?? 0;
+		const status =
+			behind > 0 && ahead > 0
+				? 'both'
+				: behind > 0
+				  ? 'behind'
+				  : ahead > 0
+				    ? 'ahead'
+				    : working > 0
+				      ? 'working'
+				      : undefined;
+
+		const branchName = wip.repositoryCount > 1 ? `${wip.repo.name}:${branch.name}` : branch.name;
+
+		return {
+			branch: branchName,
+			upstream: branch.upstream?.name,
+			ahead: ahead,
+			behind: behind,
+			working: wip.changes?.files.length ?? 0,
+			status: status,
+		};
 	}
 
 	get navigation() {
@@ -72,628 +161,368 @@ export class GlCommitDetailsApp extends LitElement {
 		return actions;
 	}
 
-	override updated(changedProperties: Map<string, any>) {
-		if (changedProperties.has('explain')) {
-			this.explainBusy = false;
-			this.querySelector('[data-region="commit-explanation"]')?.scrollIntoView();
+	private _disposables: Disposable[] = [];
+	private _hostIpc!: HostIpc;
+
+	constructor() {
+		super();
+
+		defineGkElement(Badge);
+	}
+
+	private indentPreference = 16;
+	private updateDocumentProperties() {
+		const preference = this.state?.preferences?.indent;
+		if (preference === this.indentPreference) return;
+		this.indentPreference = preference ?? 16;
+
+		const rootStyle = document.documentElement.style;
+		rootStyle.setProperty('--gitlens-tree-indent', `${this.indentPreference}px`);
+	}
+
+	override updated(changedProperties: Map<string | number | symbol, unknown>) {
+		if (changedProperties.has('state')) {
+			this.updateDocumentProperties();
+			if (this.state?.inReview != null && this.state.inReview != this.draftState.inReview) {
+				this.draftState.inReview = this.state.inReview;
+			}
 		}
 	}
 
-	private renderEmptyContent() {
+	override connectedCallback() {
+		super.connectedCallback();
+
+		this._hostIpc = new HostIpc('commit-details');
+
+		this._disposables = [
+			this._hostIpc.onReceiveMessage(e => this.onMessageReceived(e)),
+			this._hostIpc,
+
+			DOM.on<GlInspectNav, { action: string; alt: boolean }>('gl-inspect-nav', 'gl-commit-actions', e =>
+				this.onCommitActions(e),
+			),
+			DOM.on<GlInspectNav, { action: string; alt: boolean }>('gl-status-nav', 'gl-branch-action', e =>
+				this.onBranchAction(e.detail.action),
+			),
+			DOM.on('[data-action="pick-commit"]', 'click', e => this.onPickCommit(e)),
+			DOM.on('[data-action="wip"]', 'click', e => this.onSwitchMode(e, 'wip')),
+			DOM.on('[data-action="details"]', 'click', e => this.onSwitchMode(e, 'commit')),
+			DOM.on('[data-action="search-commit"]', 'click', e => this.onSearchCommit(e)),
+			DOM.on('[data-action="files-layout"]', 'click', e => this.onToggleFilesLayout(e)),
+			DOM.on<GlInspectNav, undefined>('gl-inspect-nav', 'gl-pin', () => this.onTogglePin()),
+			DOM.on<GlInspectNav, undefined>('gl-inspect-nav', 'gl-back', () => this.onNavigate('back')),
+			DOM.on<GlInspectNav, undefined>('gl-inspect-nav', 'gl-forward', () => this.onNavigate('forward')),
+			DOM.on('[data-action="create-patch"]', 'click', _e => this.onCreatePatchFromWip(true)),
+			DOM.on<WebviewPane, WebviewPaneExpandedChangeEventDetail>(
+				'[data-region="rich-pane"]',
+				'expanded-change',
+				e => this.onExpandedChange(e.detail, 'autolinks'),
+			),
+			DOM.on<WebviewPane, WebviewPaneExpandedChangeEventDetail>(
+				'[data-region="pullrequest-pane"]',
+				'expanded-change',
+				e => this.onExpandedChange(e.detail, 'pullrequest'),
+			),
+			DOM.on('[data-action="explain-commit"]', 'click', e => this.onExplainCommit(e)),
+			DOM.on('[data-action="switch-ai"]', 'click', e => this.onSwitchAiModel(e)),
+			DOM.on<GlWipDetails, { checked: boolean | 'staged' }>('gl-wip-details', 'create-patch', e =>
+				this.onCreatePatchFromWip(e.detail.checked),
+			),
+
+			DOM.on<GlCommitDetails, FileChangeListItemDetail>('gl-commit-details', 'file-open-on-remote', e =>
+				this.onOpenFileOnRemote(e.detail),
+			),
+			DOM.on<GlCommitDetails, FileChangeListItemDetail>('gl-commit-details,gl-wip-details', 'file-open', e =>
+				this.onOpenFile(e.detail),
+			),
+			DOM.on<GlCommitDetails, FileChangeListItemDetail>('gl-commit-details', 'file-compare-working', e =>
+				this.onCompareFileWithWorking(e.detail),
+			),
+			DOM.on<GlCommitDetails, FileChangeListItemDetail>(
+				'gl-commit-details,gl-wip-details',
+				'file-compare-previous',
+				e => this.onCompareFileWithPrevious(e.detail),
+			),
+			DOM.on<GlCommitDetails, FileChangeListItemDetail>('gl-commit-details', 'file-more-actions', e =>
+				this.onFileMoreActions(e.detail),
+			),
+			DOM.on<GlWipDetails, FileChangeListItemDetail>('gl-wip-details', 'file-stage', e =>
+				this.onStageFile(e.detail),
+			),
+			DOM.on<GlWipDetails, FileChangeListItemDetail>('gl-wip-details', 'file-unstage', e =>
+				this.onUnstageFile(e.detail),
+			),
+			DOM.on<GlWipDetails, { name: string }>('gl-wip-details', 'data-action', e =>
+				this.onBranchAction(e.detail.name),
+			),
+			DOM.on<GlWipDetails, CreatePatchEventDetail>('gl-wip-details', 'gl-inspect-create-suggestions', e =>
+				this.onSuggestChanges(e.detail),
+			),
+			DOM.on<GlWipDetails, CreatePatchMetadataEventDetail>('gl-wip-details', 'gl-patch-generate-title', e =>
+				this.onCreateGenerateTitle(e.detail),
+			),
+			DOM.on<GlWipDetails, { id: string }>('gl-wip-details', 'gl-show-code-suggestion', e =>
+				this.onShowCodeSuggestion(e.detail),
+			),
+			DOM.on<GlWipDetails, any>('gl-wip-details', 'gl-patch-file-compare-previous', e =>
+				this.onCompareFileWithPrevious(e.detail),
+			),
+			DOM.on<GlWipDetails, FileChangeListItemDetail>('gl-wip-details', 'gl-patch-file-open', e =>
+				this.onOpenFile(e.detail),
+			),
+			DOM.on<GlWipDetails, FileChangeListItemDetail>('gl-wip-details', 'gl-patch-file-stage', e =>
+				this.onStageFile(e.detail),
+			),
+			DOM.on<GlWipDetails, FileChangeListItemDetail>('gl-wip-details', 'gl-patch-file-unstage', e =>
+				this.onUnstageFile(e.detail),
+			),
+			DOM.on<GlWipDetails, undefined>('gl-wip-details', 'gl-patch-create-cancelled', () =>
+				this.onDraftStateChanged(false),
+			),
+			DOM.on<IssuePullRequest, undefined>(
+				'gl-status-nav,issue-pull-request',
+				'gl-issue-pull-request-details',
+				() => this.onBranchAction('open-pr-details'),
+			),
+		];
+	}
+
+	private onSuggestChanges(e: CreatePatchEventDetail) {
+		this._hostIpc.sendCommand(SuggestChangesCommand, e);
+	}
+
+	private onShowCodeSuggestion(e: { id: string }) {
+		this._hostIpc.sendCommand(ShowCodeSuggestionCommand, e);
+	}
+
+	private onMessageReceived(msg: IpcMessage) {
+		switch (true) {
+			// case DidChangeRichStateNotificationType.method:
+			// 	onIpc(DidChangeRichStateNotificationType, msg, params => {
+			// 		if (this.state.selected == null) return;
+
+			// 		assertsSerialized<typeof params>(params);
+
+			// 		const newState = { ...this.state };
+			// 		if (params.formattedMessage != null) {
+			// 			newState.selected!.message = params.formattedMessage;
+			// 		}
+			// 		// if (params.pullRequest != null) {
+			// 		newState.pullRequest = params.pullRequest;
+			// 		// }
+			// 		// if (params.formattedMessage != null) {
+			// 		newState.autolinkedIssues = params.autolinkedIssues;
+			// 		// }
+
+			// 		this.state = newState;
+			// 		this.setState(this.state);
+
+			// 		this.renderRichContent();
+			// 	});
+			// 	break;
+			case DidChangeNotification.is(msg):
+				assertsSerialized<State>(msg.params.state);
+
+				this.state = msg.params.state;
+				this.dispatchEvent(new CustomEvent('state-changed', { detail: this.state }));
+				// this.setState(this.state);
+				// this.attachState();
+				break;
+
+			case DidChangeWipStateNotification.is(msg):
+				this.state = { ...this.state!, wip: msg.params.wip, inReview: msg.params.inReview };
+				this.dispatchEvent(new CustomEvent('state-changed', { detail: this.state }));
+				// this.setState(this.state);
+				// this.attachState();
+				break;
+			case DidChangeDraftStateNotification.is(msg):
+				this.onDraftStateChanged(msg.params.inReview, true);
+				break;
+			case DidChangeConnectedJiraNotification.is(msg):
+				this.state = { ...this.state!, hasConnectedJira: msg.params.hasConnectedJira };
+				this.dispatchEvent(new CustomEvent('state-changed', { detail: this.state }));
+				break;
+			case DidChangeHasAccountNotification.is(msg):
+				this.state = { ...this.state!, hasAccount: msg.params.hasAccount };
+				this.dispatchEvent(new CustomEvent('state-changed', { detail: this.state }));
+				break;
+		}
+	}
+
+	override disconnectedCallback() {
+		this._disposables.forEach(d => d.dispose());
+		this._disposables = [];
+
+		super.disconnectedCallback();
+	}
+
+	renderTopInspect() {
+		if (this.state?.commit == null) return nothing;
+
+		return html`<gl-inspect-nav
+			?uncommitted=${this.isUncommitted}
+			?pinned=${this.state?.pinned}
+			.navigation=${this.state?.navigationStack}
+			.shortSha=${this.state?.commit.shortSha ?? ''}
+			.stashNumber=${this.state?.commit.stashNumber}
+		></gl-inspect-nav>`;
+	}
+
+	renderTopWip() {
+		if (this.state?.wip == null) return nothing;
+
+		return html`<gl-status-nav .wip=${this.state.wip} .preferences=${this.state.preferences}></gl-status-nav>`;
+	}
+
+	private renderRepoStatusContent(_isWip: boolean) {
+		const statusIndicator = this.wipStatus?.status;
 		return html`
-			<div class="section section--empty" id="empty">
-				<p>Rich details for commits and stashes are shown as you navigate:</p>
+			<code-icon icon="gl-repository-filled"></code-icon>
+			${when(
+				this.wipStatus?.status != null,
+				() =>
+					html`<gl-tracking-pill
+						class="inspect-header__tab-tracking"
+						.ahead=${this.wipStatus!.ahead}
+						.behind=${this.wipStatus!.behind}
+						.working=${this.wipStatus!.working}
+						outlined
+					></gl-tracking-pill>`,
+			)}
+			${when(
+				statusIndicator != null,
+				() =>
+					html`<gl-indicator
+						class="inspect-header__tab-indicator inspect-header__tab-indicator--${statusIndicator}"
+					></gl-indicator>`,
+			)}
+		`;
+		// ${when(
+		// 	isWip !== true && statusIndicator != null,
+		// 	() => html`<gl-indicator pulse class="inspect-header__tab-pulse"></gl-indicator>`,
+		// )}
+	}
 
-				<ul class="bulleted">
-					<li>lines in the text editor</li>
-					<li>
-						commits in the <a href="command:gitlens.showGraph">Commit Graph</a>,
-						<a href="command:gitlens.showTimelineView">Visual File History</a>, or
-						<a href="command:gitlens.showCommitsView">Commits view</a>
-					</li>
-					<li>stashes in the <a href="command:gitlens.showStashesView">Stashes view</a></li>
-				</ul>
+	renderWipTooltipContent() {
+		if (this.wipStatus == null) return 'Overview';
 
-				<p>Alternatively, search for or choose a commit</p>
+		return html`
+			Overview of &nbsp;<code-icon icon="git-branch" size="12"></code-icon
+			><span class="md-code">${this.wipStatus.branch}</span>
+			${when(
+				this.wipStatus.status === 'both',
+				() =>
+					html`<hr />
+						<span class="md-code">${this.wipStatus!.branch}</span> is
+						${pluralize('commit', this.wipStatus!.behind)} behind and
+						${pluralize('commit', this.wipStatus!.ahead)} ahead of
+						<span class="md-code">${this.wipStatus!.upstream ?? 'origin'}</span>`,
+			)}
+			${when(
+				this.wipStatus.status === 'behind',
+				() =>
+					html`<hr />
+						<span class="md-code">${this.wipStatus!.branch}</span> is
+						${pluralize('commit', this.wipStatus!.behind)} behind
+						<span class="md-code">${this.wipStatus!.upstream ?? 'origin'}</span>`,
+			)}
+			${when(
+				this.wipStatus.status === 'ahead',
+				() =>
+					html`<hr />
+						<span class="md-code">${this.wipStatus!.branch}</span> is
+						${pluralize('commit', this.wipStatus!.ahead)} ahead of
+						<span class="md-code"> ${this.wipStatus!.upstream ?? 'origin'}</span>`,
+			)}
+			${when(
+				this.wipStatus.working > 0,
+				() =>
+					html`<hr />
+						${pluralize('working change', this.wipStatus!.working)}`,
+			)}
+		`;
+	}
 
-				<p class="button-container">
-					<span class="button-group">
-						<button class="button button--full" type="button" data-action="pick-commit">
-							Choose Commit...
+	renderTopSection() {
+		const isWip = this.state?.mode === 'wip';
+
+		return html`
+			<div class="inspect-header">
+				<nav class="inspect-header__tabs">
+					<gl-tooltip hoist>
+						<button class="inspect-header__tab${!isWip ? ' is-active' : ''}" data-action="details">
+							<code-icon icon="gl-inspect"></code-icon>
 						</button>
-						<button
-							class="button"
-							type="button"
-							data-action="search-commit"
-							aria-label="Search for Commit"
-							title="Search for Commit"
+						<span slot="content"
+							>${this.state?.commit != null
+								? !this.isStash
+									? html`Inspect Commit
+											<span class="md-code"
+												><code-icon icon="git-commit"></code-icon> ${this.state.commit
+													.shortSha}</span
+											>`
+									: html`Inspect Stash
+											<span class="md-code"
+												><code-icon icon="gl-stashes-view"></code-icon> #${this.state.commit
+													.stashNumber}</span
+											>`
+								: 'Inspect'}${this.state?.pinned
+								? html`(pinned)
+										<hr />
+										Automatic following is suspended while pinned`
+								: ''}</span
 						>
-							<code-icon icon="search"></code-icon>
+					</gl-tooltip>
+					<gl-tooltip hoist>
+						<button class="inspect-header__tab${isWip ? ' is-active' : ''}" data-action="wip">
+							${this.renderRepoStatusContent(isWip)}
 						</button>
-					</span>
-				</p>
-			</div>
-		`;
-	}
-
-	private renderCommitMessage() {
-		if (this.state?.selected == null) {
-			return undefined;
-		}
-
-		const message = this.state.selected.message;
-		const index = message.indexOf(messageHeadlineSplitterToken);
-		return html`
-			<div class="section section--message">
-				<div class="message-block">
+						<span slot="content">${this.renderWipTooltipContent()}</span>
+					</gl-tooltip>
+				</nav>
+				<div class="inspect-header__content">
 					${when(
-						index === -1,
-						() =>
-							html`<p class="message-block__text scrollable" data-region="message">
-								<strong>${unsafeHTML(message)}</strong>
-							</p>`,
-						() =>
-							html`<p class="message-block__text scrollable" data-region="message">
-								<strong>${unsafeHTML(message.substring(0, index))}</strong><br /><span
-									>${unsafeHTML(message.substring(index + 3))}</span
-								>
-							</p>`,
+						this.state?.mode !== 'wip',
+						() => this.renderTopInspect(),
+						() => this.renderTopWip(),
 					)}
 				</div>
 			</div>
-		`;
-	}
-
-	private renderAutoLinks() {
-		if (this.isUncommitted) {
-			return undefined;
-		}
-
-		const deduped = new Map<
-			string,
-			| { type: 'autolink'; value: Serialized<Autolink> }
-			| { type: 'issue'; value: Serialized<IssueOrPullRequest> }
-			| { type: 'pr'; value: Serialized<PullRequestShape> }
-		>();
-
-		if (this.state?.selected?.autolinks != null) {
-			for (const autolink of this.state.selected.autolinks) {
-				deduped.set(autolink.id, { type: 'autolink', value: autolink });
-			}
-		}
-
-		if (this.state?.autolinkedIssues != null) {
-			for (const issue of this.state.autolinkedIssues) {
-				deduped.set(issue.id, { type: 'issue', value: issue });
-			}
-		}
-
-		if (this.state?.pullRequest != null) {
-			deduped.set(this.state.pullRequest.id, { type: 'pr', value: this.state.pullRequest });
-		}
-
-		const autolinks: Serialized<Autolink>[] = [];
-		const issues: Serialized<IssueOrPullRequest>[] = [];
-		const prs: Serialized<PullRequestShape>[] = [];
-
-		for (const item of deduped.values()) {
-			switch (item.type) {
-				case 'autolink':
-					autolinks.push(item.value);
-					break;
-				case 'issue':
-					issues.push(item.value);
-					break;
-				case 'pr':
-					prs.push(item.value);
-					break;
-			}
-		}
-
-		return html`
-			<webview-pane
-				collapsable
-				?expanded=${this.state?.preferences?.autolinksExpanded ?? true}
-				?loading=${!this.state?.includeRichContent}
-				data-region="rich-pane"
-			>
-				<span slot="title">Autolinks</span>
-				<span slot="subtitle" data-region="autolink-count"
-					>${this.state?.includeRichContent || deduped.size ? `${deduped.size} found ` : ''}${this.state
-						?.includeRichContent
-						? ''
-						: '…'}</span
-				>
-				${when(
-					this.state == null,
-					() => html`
-						<div class="section" data-region="autolinks">
-							<section class="auto-link" aria-label="Custom Autolinks" data-region="custom-autolinks">
-								<skeleton-loader lines="2"></skeleton-loader>
-							</section>
-							<section class="pull-request" aria-label="Pull request" data-region="pull-request">
-								<skeleton-loader lines="2"></skeleton-loader>
-							</section>
-							<section class="issue" aria-label="Issue" data-region="issue">
-								<skeleton-loader lines="2"></skeleton-loader>
-							</section>
-						</div>
-					`,
-					() => {
-						if (deduped.size === 0) {
-							return html`
-								<div class="section" data-region="rich-info">
-									<p>
-										<code-icon icon="info"></code-icon>&nbsp;Use
-										<a href="#" data-action="autolink-settings" title="Configure autolinks"
-											>autolinks</a
-										>
-										to linkify external references, like Jira issues or Zendesk tickets, in commit
-										messages.
-									</p>
-								</div>
-							`;
-						}
-						return html`
-							<div class="section" data-region="autolinks">
-								${autolinks.length
-									? html`
-											<section
-												class="auto-link"
-												aria-label="Custom Autolinks"
-												data-region="custom-autolinks"
-											>
-												${autolinks.map(autolink => {
-													let name = autolink.description ?? autolink.title;
-													if (name === undefined) {
-														name = `Custom Autolink ${autolink.prefix}${autolink.id}`;
-													}
-													return html`
-														<issue-pull-request
-															type="autolink"
-															name="${name}"
-															url="${autolink.url}"
-															key="${autolink.prefix}${autolink.id}"
-															status=""
-														></issue-pull-request>
-													`;
-												})}
-											</section>
-									  `
-									: undefined}
-								${prs.length
-									? html`
-											<section
-												class="pull-request"
-												aria-label="Pull request"
-												data-region="pull-request"
-											>
-												${prs.map(
-													pr => html`
-														<issue-pull-request
-																type="pr"
-																name="${pr.title}"
-																url="${pr.url}"
-																key="#${pr.id}"
-																status="${pr.state}"
-																date=${pr.date}
-																dateFormat="${this.state!.dateFormat}"
-															></issue-pull-request>
-														</section>
-									  				`,
-												)}
-											</section>
-									  `
-									: undefined}
-								${issues.length
-									? html`
-											<section class="issue" aria-label="Issue" data-region="issue">
-												${issues.map(
-													issue => html`
-														<issue-pull-request
-															type="issue"
-															name="${issue.title}"
-															url="${issue.url}"
-															key="${issue.id}"
-															status="${issue.state}"
-															date="${issue.closed ? issue.closedDate : issue.date}"
-															dateFormat="${this.state!.dateFormat}"
-														></issue-pull-request>
-													`,
-												)}
-											</section>
-									  `
-									: undefined}
-							</div>
-						`;
-					},
-				)}
-			</webview-pane>
-		`;
-	}
-
-	private renderExplainAi() {
-		// TODO: add loading and response states
-		return html`
-			<webview-pane collapsable data-region="explain-pane">
-				<span slot="title">Explain (AI)</span>
-				<span slot="subtitle"><code-icon icon="beaker" size="12"></code-icon></span>
-				<action-nav slot="actions">
-					<action-item data-action="switch-ai" label="Switch AI Model" icon="hubot"></action-item>
-				</action-nav>
-
-				<div class="section">
-					<p>Let AI assist in understanding the changes made with this commit.</p>
-					<p class="button-container">
-						<span class="button-group">
-							<button
-								class="button button--full button--busy"
-								type="button"
-								data-action="explain-commit"
-								aria-busy="${this.explainBusy ? 'true' : nothing}"
-								@click=${this.onExplainChanges}
-								@keydown=${this.onExplainChanges}
-							>
-								<code-icon icon="loading" modifier="spin"></code-icon>Explain this Commit
-							</button>
-						</span>
-					</p>
-					${when(
-						this.explain,
-						() => html`
-							<div
-								class="ai-content${this.explain?.error ? ' has-error' : ''}"
-								data-region="commit-explanation"
-							>
-								${when(
-									this.explain?.error,
-									() =>
-										html`<p class="ai-content__summary scrollable">
-											${this.explain!.error!.message ?? 'Error retrieving content'}
-										</p>`,
-								)}
-								${when(
-									this.explain?.summary,
-									() => html`<p class="ai-content__summary scrollable">${this.explain!.summary}</p>`,
-								)}
-							</div>
-						`,
-					)}
-				</div>
-			</webview-pane>
-		`;
-	}
-
-	private renderCommitStats() {
-		if (this.state?.selected?.stats?.changedFiles == null) {
-			return undefined;
-		}
-
-		if (typeof this.state.selected.stats.changedFiles === 'number') {
-			return html`<commit-stats
-				added="?"
-				modified="${this.state.selected.stats.changedFiles}"
-				removed="?"
-			></commit-stats>`;
-		}
-
-		const { added, deleted, changed } = this.state.selected.stats.changedFiles;
-		return html`<commit-stats added="${added}" modified="${changed}" removed="${deleted}"></commit-stats>`;
-	}
-
-	private renderFileList() {
-		const files = this.state!.selected!.files!;
-
-		let items;
-		let classes;
-
-		if (this.isUncommitted) {
-			items = [];
-			classes = `indentGuides-${this.state!.indentGuides}`;
-
-			const staged = files.filter(f => f.staged);
-			if (staged.length) {
-				items.push(html`<list-item tree branch hide-icon>Staged Changes</list-item>`);
-
-				for (const f of staged) {
-					items.push(this.renderFile(f, 2, true));
-				}
-			}
-
-			const unstaged = files.filter(f => !f.staged);
-			if (unstaged.length) {
-				items.push(html`<list-item tree branch hide-icon>Unstaged Changes</list-item>`);
-
-				for (const f of unstaged) {
-					items.push(this.renderFile(f, 2, true));
-				}
-			}
-		} else {
-			items = files.map(f => this.renderFile(f));
-		}
-
-		return html`<list-container class=${classes ?? nothing}>${items}</list-container>`;
-	}
-
-	private renderFileTree() {
-		const files = this.state!.selected!.files!;
-		const compact = this.state!.preferences?.files?.compact ?? true;
-
-		let items;
-
-		if (this.isUncommitted) {
-			items = [];
-
-			const staged = files.filter(f => f.staged);
-			if (staged.length) {
-				items.push(html`<list-item tree branch hide-icon>Staged Changes</list-item>`);
-				items.push(...this.renderFileSubtree(staged, 1, compact));
-			}
-
-			const unstaged = files.filter(f => !f.staged);
-			if (unstaged.length) {
-				items.push(html`<list-item tree branch hide-icon>Unstaged Changes</list-item>`);
-				items.push(...this.renderFileSubtree(unstaged, 1, compact));
-			}
-		} else {
-			items = this.renderFileSubtree(files, 0, compact);
-		}
-
-		return html`<list-container class="indentGuides-${this.state!.indentGuides}">${items}</list-container>`;
-	}
-
-	private renderFileSubtree(files: Files, rootLevel: number, compact: boolean) {
-		const tree = makeHierarchical(
-			files,
-			n => n.path.split('/'),
-			(...parts: string[]) => parts.join('/'),
-			compact,
-		);
-		const flatTree = flattenHeirarchy(tree);
-		return flatTree.map(({ level, item }) => {
-			if (item.name === '') return undefined;
-
-			if (item.value == null) {
-				return html`
-					<list-item level="${rootLevel + level}" tree branch>
-						<code-icon slot="icon" icon="folder" title="Directory" aria-label="Directory"></code-icon>
-						${item.name}
-					</list-item>
-				`;
-			}
-
-			return this.renderFile(item.value, rootLevel + level, true);
-		});
-	}
-
-	private renderFile(file: File, level: number = 1, tree: boolean = false): TemplateResult<1> {
-		return html`
-			<file-change-list-item
-				?tree=${tree}
-				level="${level}"
-				?stash=${this.isStash}
-				?uncommitted=${this.isUncommitted}
-				icon="${file.icon.dark}"
-				path="${file.path}"
-				repo="${file.repoPath}"
-				?staged=${file.staged}
-				status="${file.status}"
-			></file-change-list-item>
-		`;
-	}
-
-	private renderChangedFiles() {
-		const layout = this.state?.preferences?.files?.layout ?? 'auto';
-
-		let value = 'tree';
-		let icon = 'list-tree';
-		let label = 'View as Tree';
-		let isTree = false;
-		if (this.state?.selected?.files != null) {
-			if (layout === 'auto') {
-				isTree = this.state.selected.files.length > (this.state.preferences?.files?.threshold ?? 5);
-			} else {
-				isTree = layout === 'tree';
-			}
-
-			switch (layout) {
-				case 'auto':
-					value = 'list';
-					icon = 'gl-list-auto';
-					label = 'View as List';
-					break;
-				case 'list':
-					value = 'tree';
-					icon = 'list-flat';
-					label = 'View as Tree';
-					break;
-				case 'tree':
-					value = 'auto';
-					icon = 'list-tree';
-					label = 'View as Auto';
-					break;
-			}
-		}
-
-		return html`
-			<webview-pane collapsable expanded>
-				<span slot="title">Files changed </span>
-				<span slot="subtitle" data-region="stats">${this.renderCommitStats()}</span>
-				<action-nav slot="actions">
-					<action-item
-						data-action="files-layout"
-						data-files-layout="${value}"
-						label="${label}"
-						icon="${icon}"
-					></action-item>
-				</action-nav>
-
-				<div class="change-list" data-region="files">
-					${when(
-						this.state?.selected?.files == null,
-						() => html`
-							<div class="section section--skeleton">
-								<skeleton-loader></skeleton-loader>
-							</div>
-							<div class="section section--skeleton">
-								<skeleton-loader></skeleton-loader>
-							</div>
-							<div class="section section--skeleton">
-								<skeleton-loader></skeleton-loader>
-							</div>
-						`,
-						() => (isTree ? this.renderFileTree() : this.renderFileList()),
-					)}
-				</div>
-			</webview-pane>
 		`;
 	}
 
 	override render() {
-		if (this.state?.selected == null) {
-			return html` <div class="commit-detail-panel scrollable">${this.renderEmptyContent()}</div>`;
-		}
+		const wip = this.state?.wip;
 
-		const pinLabel = this.state.pinned
-			? 'Unpin this Commit\nRestores Automatic Following'
-			: 'Pin this Commit\nSuspends Automatic Following';
 		return html`
 			<div class="commit-detail-panel scrollable">
+				${this.renderTopSection()}
 				<main id="main" tabindex="-1">
-					<div class="top-details">
-						<div class="top-details__top-menu">
-							<div class="top-details__actionbar${this.state.pinned ? ' is-pinned' : ''}">
-								<div class="top-details__actionbar-group">
-									<a
-										class="commit-action${this.state.pinned ? ' is-active' : ''}"
-										href="#"
-										data-action="pin"
-										aria-label="${pinLabel}"
-										title="${pinLabel}"
-										><code-icon
-											icon="${this.state.pinned ? 'gl-pinned-filled' : 'pin'}"
-											data-region="commit-pin"
-										></code-icon
-									></a>
-									<a
-										class="commit-action${this.navigation.back ? '' : ' is-disabled'}"
-										aria-disabled="${this.navigation.back ? nothing : 'true'}"
-										href="#"
-										data-action="back"
-										aria-label="Back"
-										title="Back"
-										><code-icon icon="arrow-left" data-region="commit-back"></code-icon
-									></a>
-									${when(
-										this.navigation.forward,
-										() => html`
-											<a
-												class="commit-action"
-												href="#"
-												data-action="forward"
-												aria-label="Forward"
-												title="Forward"
-												><code-icon icon="arrow-right" data-region="commit-forward"></code-icon
-											></a>
-										`,
-									)}
-									${when(
-										this.state.navigationStack.hint,
-										() => html`
-											<a
-												class="commit-action commit-action--emphasis-low"
-												href="#"
-												title="View this Commit"
-												data-action="${this.state!.pinned ? 'forward' : 'back'}"
-												><code-icon icon="git-commit"></code-icon
-												><span data-region="commit-hint"
-													>${this.state!.navigationStack.hint}</span
-												></a
-											>
-										`,
-									)}
-								</div>
-								<div class="top-details__actionbar-group">
-									${when(
-										!this.isUncommitted,
-										() => html`
-											<a
-												class="commit-action"
-												href="#"
-												data-action="commit-actions"
-												data-action-type="sha"
-												aria-label="Copy SHA
-	[⌥] Pick Commit..."
-												title="Copy SHA
-	[⌥] Pick Commit..."
-											>
-												<code-icon icon="git-commit"></code-icon>
-												<span class="top-details__sha" data-region="shortsha"
-													>${this.shortSha}</span
-												></a
-											>
-										`,
-										() => html`
-											<a
-												class="commit-action"
-												href="#"
-												data-action="commit-actions"
-												data-action-type="scm"
-												aria-label="Open SCM view"
-												title="Open SCM view"
-												><code-icon icon="source-control"></code-icon
-											></a>
-										`,
-									)}
-									<a
-										class="commit-action"
-										href="#"
-										data-action="commit-actions"
-										data-action-type="graph"
-										aria-label="Open in Commit Graph"
-										title="Open in Commit Graph"
-										><code-icon icon="gl-graph"></code-icon
-									></a>
-									${when(
-										!this.isUncommitted,
-										() => html`
-											<a
-												class="commit-action"
-												href="#"
-												data-action="commit-actions"
-												data-action-type="more"
-												aria-label="Show Commit Actions"
-												title="Show Commit Actions"
-												><code-icon icon="kebab-vertical"></code-icon
-											></a>
-										`,
-									)}
-								</div>
-							</div>
-							${when(
-								this.state.selected && this.state.selected.stashNumber == null,
-								() => html`
-									<ul class="top-details__authors" aria-label="Authors">
-										<li class="top-details__author" data-region="author">
-											<commit-identity
-												name="${this.state!.selected!.author.name}"
-												email="${this.state!.selected!.author.email}"
-												date=${this.state!.selected!.author.date}
-												dateFormat="${this.state!.dateFormat}"
-												avatarUrl="${this.state!.selected!.author.avatar ?? ''}"
-												showAvatar="${this.state!.preferences?.avatars ?? true}"
-												actionLabel="${this.state!.selected!.sha === uncommittedSha
-													? 'modified'
-													: 'committed'}"
-											></commit-identity>
-										</li>
-									</ul>
-								`,
-							)}
-						</div>
-					</div>
-					${this.renderCommitMessage()} ${this.renderAutoLinks()} ${this.renderChangedFiles()}
-					${this.renderExplainAi()}
+					${when(
+						this.state?.mode === 'commit',
+						() =>
+							html`<gl-commit-details
+								.state=${this.state}
+								.files=${this.state?.commit?.files}
+								.explain=${this.explain}
+								.preferences=${this.state?.preferences}
+								.orgSettings=${this.state?.orgSettings}
+								.isUncommitted=${this.isUncommitted}
+							></gl-commit-details>`,
+						() =>
+							html`<gl-wip-details
+								.wip=${wip}
+								.files=${wip?.changes?.files}
+								.preferences=${this.state?.preferences}
+								.orgSettings=${this.state?.orgSettings}
+								.generate=${this.generate}
+								.isUncommitted=${true}
+								.emptyText=${'No working changes'}
+								.draftState=${this.draftState}
+								@draft-state-changed=${(e: CustomEvent<{ inReview: boolean }>) =>
+									this.onDraftStateChanged(e.detail.inReview)}
+							></gl-wip-details>`,
+					)}
 				</main>
 			</div>
 		`;
@@ -703,45 +532,204 @@ export class GlCommitDetailsApp extends LitElement {
 		return this;
 	}
 
-	onExplainChanges(e: MouseEvent | KeyboardEvent) {
-		if (this.explainBusy === true || (e instanceof KeyboardEvent && e.key !== 'Enter')) {
-			e.preventDefault();
-			e.stopPropagation();
+	private onDraftStateChanged(inReview: boolean, silent = false) {
+		if (inReview === this.draftState.inReview) return;
+		this.draftState = { ...this.draftState, inReview: inReview };
+		this.requestUpdate('draftState');
+
+		if (!silent) {
+			this._hostIpc.sendCommand(ChangeReviewModeCommand, { inReview: inReview });
+		}
+	}
+
+	private onBranchAction(name: string) {
+		switch (name) {
+			case 'pull':
+				this._hostIpc.sendCommand(PullCommand, undefined);
+				break;
+			case 'push':
+				this._hostIpc.sendCommand(PushCommand, undefined);
+				// this.onCommandClickedCore('gitlens.pushRepositories');
+				break;
+			case 'fetch':
+				this._hostIpc.sendCommand(FetchCommand, undefined);
+				// this.onCommandClickedCore('gitlens.fetchRepositories');
+				break;
+			case 'publish-branch':
+				this._hostIpc.sendCommand(PublishCommand, undefined);
+				// this.onCommandClickedCore('gitlens.publishRepository');
+				break;
+			case 'switch':
+				this._hostIpc.sendCommand(SwitchCommand, undefined);
+				// this.onCommandClickedCore('gitlens.views.switchToBranch');
+				break;
+			case 'open-pr-changes':
+				this._hostIpc.sendCommand(OpenPullRequestChangesCommand, undefined);
+				break;
+			case 'open-pr-compare':
+				this._hostIpc.sendCommand(OpenPullRequestComparisonCommand, undefined);
+				break;
+			case 'open-pr-remote':
+				this._hostIpc.sendCommand(OpenPullRequestOnRemoteCommand, undefined);
+				break;
+			case 'open-pr-details':
+				this._hostIpc.sendCommand(OpenPullRequestDetailsCommand, undefined);
+				break;
+		}
+	}
+
+	private onCreatePatchFromWip(checked: boolean | 'staged' = true) {
+		if (this.state?.wip?.changes == null) return;
+		this._hostIpc.sendCommand(CreatePatchFromWipCommand, { changes: this.state.wip.changes, checked: checked });
+	}
+
+	private onCommandClickedCore(action?: string) {
+		const command = action?.startsWith('command:') ? action.slice(8) : action;
+		if (command == null) return;
+
+		this._hostIpc.sendCommand(ExecuteCommand, { command: command });
+	}
+
+	private onSwitchAiModel(_e: MouseEvent) {
+		this.onCommandClickedCore('gitlens.switchAIModel');
+	}
+
+	async onExplainCommit(_e: MouseEvent) {
+		try {
+			const result = await this._hostIpc.sendRequest(ExplainRequest, undefined);
+			if (result.error) {
+				this.explain = { error: { message: result.error.message ?? 'Error retrieving content' } };
+			} else if (result.summary) {
+				this.explain = { summary: result.summary };
+			} else {
+				this.explain = undefined;
+			}
+		} catch (ex) {
+			this.explain = { error: { message: 'Error retrieving content' } };
+		}
+	}
+
+	private async onCreateGenerateTitle(_e: CreatePatchMetadataEventDetail) {
+		try {
+			const result = await this._hostIpc.sendRequest(GenerateRequest, undefined);
+
+			if (result.error) {
+				this.generate = { error: { message: result.error.message ?? 'Error retrieving content' } };
+			} else if (result.title || result.description) {
+				this.generate = {
+					title: result.title,
+					description: result.description,
+				};
+				// this.state = {
+				// 	...this.state,
+				// 	create: {
+				// 		...this.state.create!,
+				// 		title: result.title ?? this.state.create?.title,
+				// 		description: result.description ?? this.state.create?.description,
+				// 	},
+				// };
+				// this.setState(this.state);
+			} else {
+				this.generate = undefined;
+			}
+		} catch (ex) {
+			this.generate = { error: { message: 'Error retrieving content' } };
+		}
+		this.requestUpdate('generate');
+	}
+
+	private onToggleFilesLayout(e: MouseEvent) {
+		const layout = ((e.target as HTMLElement)?.dataset.filesLayout as ViewFilesLayout) ?? undefined;
+		if (layout === this.state?.preferences?.files?.layout) return;
+
+		const files = {
+			...this.state!.preferences?.files,
+			layout: layout ?? 'auto',
+		};
+
+		this.state = { ...this.state, preferences: { ...this.state!.preferences, files: files } } as any;
+		// this.attachState();
+
+		this._hostIpc.sendCommand(UpdatePreferencesCommand, { files: files });
+	}
+
+	private onExpandedChange(e: WebviewPaneExpandedChangeEventDetail, pane: string) {
+		let preferenceChange;
+		if (pane === 'autolinks') {
+			preferenceChange = { autolinksExpanded: e.expanded };
+		} else if (pane === 'pullrequest') {
+			preferenceChange = { pullRequestExpanded: e.expanded };
+		}
+		if (preferenceChange == null) return;
+
+		this.state = {
+			...this.state,
+			preferences: { ...this.state!.preferences, ...preferenceChange },
+		} as any;
+		// this.attachState();
+
+		this._hostIpc.sendCommand(UpdatePreferencesCommand, preferenceChange);
+	}
+
+	private onNavigate(direction: 'back' | 'forward') {
+		this._hostIpc.sendCommand(NavigateCommand, { direction: direction });
+	}
+
+	private onTogglePin() {
+		this._hostIpc.sendCommand(PinCommand, { pin: !this.state!.pinned });
+	}
+
+	private onPickCommit(_e: MouseEvent) {
+		this._hostIpc.sendCommand(PickCommitCommand, undefined);
+	}
+
+	private onSearchCommit(_e: MouseEvent) {
+		this._hostIpc.sendCommand(SearchCommitCommand, undefined);
+	}
+
+	private onSwitchMode(_e: MouseEvent, mode: Mode) {
+		this.state = { ...this.state, mode: mode } as any;
+		// this.attachState();
+
+		this._hostIpc.sendCommand(SwitchModeCommand, { mode: mode, repoPath: this.state!.commit?.repoPath });
+	}
+
+	private onOpenFileOnRemote(e: FileChangeListItemDetail) {
+		this._hostIpc.sendCommand(OpenFileOnRemoteCommand, e);
+	}
+
+	private onOpenFile(e: FileChangeListItemDetail) {
+		this._hostIpc.sendCommand(OpenFileCommand, e);
+	}
+
+	private onCompareFileWithWorking(e: FileChangeListItemDetail) {
+		this._hostIpc.sendCommand(OpenFileCompareWorkingCommand, e);
+	}
+
+	private onCompareFileWithPrevious(e: FileChangeListItemDetail) {
+		this._hostIpc.sendCommand(OpenFileComparePreviousCommand, e);
+	}
+
+	private onFileMoreActions(e: FileChangeListItemDetail) {
+		this._hostIpc.sendCommand(ExecuteFileActionCommand, e);
+	}
+
+	private onStageFile(e: FileChangeListItemDetail): void {
+		this._hostIpc.sendCommand(StageFileCommand, e);
+	}
+
+	private onUnstageFile(e: FileChangeListItemDetail): void {
+		this._hostIpc.sendCommand(UnstageFileCommand, e);
+	}
+
+	private onCommitActions(e: CustomEvent<{ action: string; alt: boolean }>) {
+		if (this.state?.commit === undefined) {
 			return;
 		}
 
-		this.explainBusy = true;
-	}
-}
-
-function flattenHeirarchy<T>(item: HierarchicalItem<T>, level = 0): { level: number; item: HierarchicalItem<T> }[] {
-	const flattened: { level: number; item: HierarchicalItem<T> }[] = [];
-	if (item == null) return flattened;
-
-	flattened.push({ level: level, item: item });
-
-	if (item.children != null) {
-		const children = Array.from(item.children.values());
-		children.sort((a, b) => {
-			if (!a.value || !b.value) {
-				return (a.value ? 1 : -1) - (b.value ? 1 : -1);
-			}
-
-			if (a.relativePath < b.relativePath) {
-				return -1;
-			}
-
-			if (a.relativePath > b.relativePath) {
-				return 1;
-			}
-
-			return 0;
-		});
-
-		children.forEach(child => {
-			flattened.push(...flattenHeirarchy(child, level + 1));
+		this._hostIpc.sendCommand(ExecuteCommitActionCommand, {
+			action: e.detail.action as ExecuteCommitActionsParams['action'],
+			alt: e.detail.alt,
 		});
 	}
-
-	return flattened;
 }

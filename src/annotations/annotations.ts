@@ -8,7 +8,7 @@ import type {
 } from 'vscode';
 import { OverviewRulerLane, ThemeColor, Uri, window } from 'vscode';
 import type { Config } from '../config';
-import type { Colors, CoreConfiguration } from '../constants';
+import type { Colors } from '../constants';
 import { GlyphChars } from '../constants';
 import type { CommitFormatOptions } from '../git/formatters/commitFormatter';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
@@ -16,6 +16,7 @@ import type { GitCommit } from '../git/models/commit';
 import { scale, toRgba } from '../system/color';
 import { configuration } from '../system/configuration';
 import { getWidth, interpolate, pad } from '../system/string';
+import type { BlameFontOptions } from './gutterBlameAnnotationProvider';
 
 export interface ComputedHeatmap {
 	coldThresholdTimestamp: number;
@@ -23,6 +24,12 @@ export interface ComputedHeatmap {
 	computeRelativeAge(date: Date): number;
 	computeOpacity(date: Date): number;
 }
+
+export type Decoration<T extends Range[] | DecorationOptions[] = Range[] | DecorationOptions[]> = {
+	decorationType: TextEditorDecorationType;
+	rangesOrOptions: T;
+	dispose?: boolean;
+};
 
 interface RenderOptions
 	extends DecorationInstanceRenderOptions,
@@ -93,7 +100,7 @@ export function addOrUpdateGutterHeatmapDecoration(
 	date: Date,
 	heatmap: ComputedHeatmap,
 	range: Range,
-	map: Map<string, { decorationType: TextEditorDecorationType; rangesOrOptions: Range[] }>,
+	map: Map<string, Decoration<Range[]>>,
 ) {
 	const [r, g, b, a] = getHeatmapColor(date, heatmap);
 
@@ -113,7 +120,7 @@ export function addOrUpdateGutterHeatmapDecoration(
 				gutterIconPath: gutter
 					? Uri.parse(
 							`data:image/svg+xml,${encodeURIComponent(
-								`<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><rect fill='rgb(${r},${g},${b})' fill-opacity='${a}' x='15' y='0' width='3' height='18'/></svg>`,
+								`<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><rect fill='rgb(${r},${g},${b})' fill-opacity='${a}' x='8' y='0' width='3' height='18'/></svg>`,
 							)}`,
 					  )
 					: undefined,
@@ -122,6 +129,7 @@ export function addOrUpdateGutterHeatmapDecoration(
 				overviewRulerColor: scrollbar ? `rgba(${r},${g},${b},${a * 0.7})` : undefined,
 			}),
 			rangesOrOptions: [range],
+			dispose: true,
 		};
 		map.set(key, colorDecoration);
 	} else {
@@ -159,6 +167,7 @@ export function getGutterRenderOptions(
 	avatars: boolean,
 	format: string,
 	options: CommitFormatOptions,
+	fontOptions: BlameFontOptions,
 ): RenderOptions {
 	// Get the character count of all the tokens, assuming there there is a cap (bail if not)
 	let chars = 0;
@@ -192,7 +201,7 @@ export function getGutterRenderOptions(
 
 	let width;
 	if (chars >= 0) {
-		const spacing = configuration.getAny<CoreConfiguration, number>('editor.letterSpacing');
+		const spacing = configuration.getCore('editor.letterSpacing');
 		if (spacing != null && spacing !== 0) {
 			width = `calc(${chars}ch + ${Math.round(chars * spacing) + (avatars ? 13 : -6)}px)`;
 		} else {
@@ -205,13 +214,15 @@ export function getGutterRenderOptions(
 		borderStyle: borderStyle,
 		borderWidth: borderWidth,
 		color: new ThemeColor('gitlens.gutterForegroundColor' satisfies Colors),
-		fontWeight: 'normal',
-		fontStyle: 'normal',
+		fontWeight: fontOptions.weight ?? 'normal',
+		fontStyle: fontOptions.style ?? 'normal',
 		height: '100%',
 		margin: '0 26px -1px 0',
 		textDecoration: `${separateLines ? 'overline solid rgba(0, 0, 0, .2)' : 'none'};box-sizing: border-box${
 			avatars ? ';padding: 0 0 0 18px' : ''
-		}`,
+		}${fontOptions.family ? `;font-family: ${fontOptions.family}` : ''}${
+			fontOptions.size ? `;font-size: ${fontOptions.size}px` : ''
+		};`,
 		width: width,
 		uncommittedColor: new ThemeColor('gitlens.gutterUncommittedForegroundColor' satisfies Colors),
 	};
@@ -223,6 +234,7 @@ export function getInlineDecoration(
 	// editorLine: number,
 	format: string,
 	formatOptions?: CommitFormatOptions,
+	fontOptions?: BlameFontOptions,
 	scrollable: boolean = true,
 ): Partial<DecorationOptions> {
 	// TODO: Enable this once there is better caching
@@ -243,10 +255,12 @@ export function getInlineDecoration(
 				backgroundColor: new ThemeColor('gitlens.trailingLineBackgroundColor' satisfies Colors),
 				color: new ThemeColor('gitlens.trailingLineForegroundColor' satisfies Colors),
 				contentText: pad(message.replace(/ /g, GlyphChars.Space), 1, 1),
-				fontWeight: 'normal',
-				fontStyle: 'normal',
+				fontWeight: fontOptions?.weight ?? 'normal',
+				fontStyle: fontOptions?.style ?? 'normal',
 				// Pull the decoration out of the document flow if we want to be scrollable
-				textDecoration: `none;${scrollable ? '' : ' position: absolute;'}`,
+				textDecoration: `none${scrollable ? '' : ';position: absolute'}${
+					fontOptions?.family ? `;font-family: ${fontOptions.family}` : ''
+				}${fontOptions?.size ? `;font-size: ${fontOptions.size}px` : ''};`,
 			},
 		},
 	};

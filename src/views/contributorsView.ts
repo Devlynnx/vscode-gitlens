@@ -7,22 +7,26 @@ import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import type { GitContributor } from '../git/models/contributor';
 import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
+import { setContext } from '../system/context';
 import { gate } from '../system/decorators/gate';
 import { debug } from '../system/decorators/log';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { ContributorNode } from './nodes/contributorNode';
 import { ContributorsNode } from './nodes/contributorsNode';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
 
 export class ContributorsRepositoryNode extends RepositoryFolderNode<ContributorsView, ContributorsNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.child == null) {
-			this.child = new ContributorsNode(this.uri, this.view, this, this.repo);
+			this.child = new ContributorsNode(this.uri, this.view, this, this.repo, {
+				showMergeCommits: !this.view.state.hideMergeCommits,
+			});
 		}
 
 		return this.child.getChildren();
@@ -50,9 +54,19 @@ export class ContributorsRepositoryNode extends RepositoryFolderNode<Contributor
 export class ContributorsViewNode extends RepositoriesSubscribeableNode<ContributorsView, ContributorsRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let repositories = this.view.container.git.openRepositories;
+			if (
+				configuration.get('views.collapseWorktreesWhenPossible') &&
+				configuration.get('views.contributors.showAllBranches')
+			) {
+				const grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No contributors could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading contributors...'
+					: 'No contributors could be found.';
 
 				return [];
 			}
@@ -110,15 +124,30 @@ export class ContributorsViewNode extends RepositoriesSubscribeableNode<Contribu
 	}
 }
 
+interface ContributorsViewState {
+	hideMergeCommits?: boolean;
+}
+
 export class ContributorsView extends ViewBase<'contributors', ContributorsViewNode, ContributorsViewConfig> {
 	protected readonly configKey = 'contributors';
 
 	constructor(container: Container) {
 		super(container, 'contributors', 'Contributors', 'contributorsView');
+
+		void setContext('gitlens:views:contributors:hideMergeCommits', true);
 	}
 
 	override get canReveal(): boolean {
 		return this.config.reveal || !configuration.get('views.repositories.showContributors');
+	}
+
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
+	}
+
+	private readonly _state: ContributorsViewState = { hideMergeCommits: true };
+	get state(): ContributorsViewState {
+		return this._state;
 	}
 
 	protected getRoot() {
@@ -169,6 +198,17 @@ export class ContributorsView extends ViewBase<'contributors', ContributorsViewN
 				this,
 			),
 
+			registerViewCommand(
+				this.getQualifiedCommand('setShowMergeCommitsOn'),
+				() => this.setShowMergeCommits(true),
+				this,
+			),
+			registerViewCommand(
+				this.getQualifiedCommand('setShowMergeCommitsOff'),
+				() => this.setShowMergeCommits(false),
+				this,
+			),
+
 			registerViewCommand(this.getQualifiedCommand('setShowAvatarsOn'), () => this.setShowAvatars(true), this),
 			registerViewCommand(this.getQualifiedCommand('setShowAvatarsOff'), () => this.setShowAvatars(false), this),
 
@@ -196,7 +236,9 @@ export class ContributorsView extends ViewBase<'contributors', ContributorsViewN
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
 			!configuration.changed(e, 'defaultTimeFormat') &&
-			!configuration.changed(e, 'sortContributorsBy')
+			!configuration.changed(e, 'sortContributorsBy') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 		) {
 			return false;
 		}
@@ -278,6 +320,12 @@ export class ContributorsView extends ViewBase<'contributors', ContributorsViewN
 
 	private setShowAllBranches(enabled: boolean) {
 		return configuration.updateEffective(`views.${this.configKey}.showAllBranches` as const, enabled);
+	}
+
+	private setShowMergeCommits(on: boolean) {
+		void setContext('gitlens:views:contributors:hideMergeCommits', !on);
+		this.state.hideMergeCommits = !on;
+		void this.refresh(true);
 	}
 
 	private setShowAvatars(enabled: boolean) {

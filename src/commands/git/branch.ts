@@ -8,6 +8,7 @@ import type { FlagsQuickPickItem } from '../../quickpicks/items/flags';
 import { createFlagsQuickPickItem } from '../../quickpicks/items/flags';
 import { pluralize } from '../../system/string';
 import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
+import { getSteps } from '../gitCommands.utils';
 import type {
 	AsyncStepResultGenerator,
 	PartialStepState,
@@ -18,19 +19,21 @@ import type {
 	StepState,
 } from '../quickCommand';
 import {
-	appendReposToTitle,
 	canPickStepContinue,
 	createConfirmStep,
 	createPickStep,
 	endSteps,
+	QuickCommand,
+	StepResultBreak,
+} from '../quickCommand';
+import {
+	appendReposToTitle,
 	inputBranchNameStep,
 	pickBranchesStep,
 	pickBranchOrTagStep,
 	pickBranchStep,
 	pickRepositoryStep,
-	QuickCommand,
-	StepResultBreak,
-} from '../quickCommand';
+} from '../quickCommand.steps';
 
 interface Context {
 	repos: Repository[];
@@ -39,7 +42,7 @@ interface Context {
 	title: string;
 }
 
-type CreateFlags = '--switch';
+type CreateFlags = '--switch' | '--worktree';
 
 interface CreateState {
 	subcommand: 'create';
@@ -47,6 +50,8 @@ interface CreateState {
 	reference: GitReference;
 	name: string;
 	flags: CreateFlags[];
+
+	suggestNameOnly?: boolean;
 }
 
 type DeleteFlags = '--force' | '--remotes';
@@ -58,6 +63,8 @@ interface DeleteState {
 	flags: DeleteFlags[];
 }
 
+type PruneState = Replace<DeleteState, 'subcommand', 'prune'>;
+
 type RenameFlags = '-m';
 
 interface RenameState {
@@ -68,7 +75,7 @@ interface RenameState {
 	flags: RenameFlags[];
 }
 
-type State = CreateState | DeleteState | RenameState;
+type State = CreateState | DeleteState | PruneState | RenameState;
 type BranchStepState<T extends State> = SomeNonNullable<StepState<T>, 'subcommand'>;
 
 type CreateStepState<T extends CreateState = CreateState> = BranchStepState<ExcludeSome<T, 'repo', string>>;
@@ -87,6 +94,14 @@ function assertStateStepDelete(state: PartialStepState<State>): asserts state is
 	throw new Error('Missing repository');
 }
 
+type PruneStepState<T extends PruneState = PruneState> = BranchStepState<ExcludeSome<T, 'repo', string>>;
+function assertStateStepPrune(state: PartialStepState<State>): asserts state is PruneStepState {
+	if (state.repo instanceof Repository && state.subcommand === 'prune') return;
+
+	debugger;
+	throw new Error('Missing repository');
+}
+
 type RenameStepState<T extends RenameState = RenameState> = BranchStepState<ExcludeSome<T, 'repo', string>>;
 function assertStateStepRename(state: PartialStepState<State>): asserts state is RenameStepState {
 	if (state.repo instanceof Repository && state.subcommand === 'rename') return;
@@ -96,7 +111,7 @@ function assertStateStepRename(state: PartialStepState<State>): asserts state is
 }
 
 function assertStateStepDeleteBranches(
-	state: DeleteStepState,
+	state: DeleteStepState | PruneStepState,
 ): asserts state is ExcludeSome<typeof state, 'references', GitBranchReference> {
 	if (Array.isArray(state.references)) return;
 
@@ -107,6 +122,7 @@ function assertStateStepDeleteBranches(
 const subcommandToTitleMap = new Map<State['subcommand'], string>([
 	['create', 'Create'],
 	['delete', 'Delete'],
+	['prune', 'Prune'],
 	['rename', 'Rename'],
 ]);
 function getTitle(title: string, subcommand: State['subcommand'] | undefined) {
@@ -119,12 +135,12 @@ export interface BranchGitCommandArgs {
 	state?: Partial<State>;
 }
 
-export class BranchGitCommand extends QuickCommand<State> {
+export class BranchGitCommand extends QuickCommand {
 	private subcommand: State['subcommand'] | undefined;
 
 	constructor(container: Container, args?: BranchGitCommandArgs) {
 		super(container, 'branch', 'branch', 'Branch', {
-			description: 'create, rename, or delete branches',
+			description: 'create, prune, rename, or delete branches',
 		});
 
 		let counter = 0;
@@ -137,12 +153,13 @@ export class BranchGitCommand extends QuickCommand<State> {
 						counter++;
 					}
 
-					if (args.state.name != null) {
+					if (!args.state.suggestNameOnly && args.state.name != null) {
 						counter++;
 					}
 
 					break;
 				case 'delete':
+				case 'prune':
 					if (
 						args.state.references != null &&
 						(!Array.isArray(args.state.references) || args.state.references.length !== 0)
@@ -180,7 +197,9 @@ export class BranchGitCommand extends QuickCommand<State> {
 	}
 
 	override get canSkipConfirm(): boolean {
-		return this.subcommand === 'delete' || this.subcommand === 'rename' ? false : super.canSkipConfirm;
+		return this.subcommand === 'delete' || this.subcommand === 'prune' || this.subcommand === 'rename'
+			? false
+			: super.canSkipConfirm;
 	}
 
 	override get skipConfirmKey() {
@@ -212,7 +231,10 @@ export class BranchGitCommand extends QuickCommand<State> {
 
 			this.subcommand = state.subcommand;
 
-			context.title = getTitle(state.subcommand === 'delete' ? 'Branches' : this.title, state.subcommand);
+			context.title = getTitle(
+				state.subcommand === 'delete' || state.subcommand === 'prune' ? 'Branches' : this.title,
+				state.subcommand,
+			);
 
 			if (state.counter < 2 || state.repo == null || typeof state.repo === 'string') {
 				skippedStepTwo = false;
@@ -240,6 +262,10 @@ export class BranchGitCommand extends QuickCommand<State> {
 					break;
 				case 'delete':
 					assertStateStepDelete(state);
+					yield* this.deleteCommandSteps(state, context);
+					break;
+				case 'prune':
+					assertStateStepPrune(state);
 					yield* this.deleteCommandSteps(state, context);
 					break;
 				case 'rename':
@@ -280,6 +306,12 @@ export class BranchGitCommand extends QuickCommand<State> {
 					item: 'delete',
 				},
 				{
+					label: 'prune',
+					description: 'deletes local branches with missing upstreams',
+					picked: state.subcommand === 'prune',
+					item: 'prune',
+				},
+				{
 					label: 'rename',
 					description: 'renames the specified branch',
 					picked: state.subcommand === 'rename',
@@ -314,7 +346,6 @@ export class BranchGitCommand extends QuickCommand<State> {
 
 			if (state.counter < 4 || state.name == null) {
 				const result = yield* inputBranchNameStep(state, context, {
-					placeholder: 'Please provide a name for the new branch',
 					titleContext: ` from ${getReferenceLabel(state.reference, {
 						capitalize: true,
 						icon: false,
@@ -332,6 +363,25 @@ export class BranchGitCommand extends QuickCommand<State> {
 				if (result === StepResultBreak) continue;
 
 				state.flags = result;
+			}
+
+			if (state.flags.includes('--worktree')) {
+				const worktreeResult = yield* getSteps(
+					this.container,
+					{
+						command: 'worktree',
+						state: {
+							subcommand: 'create',
+							reference: state.reference,
+							createBranch: state.name,
+						},
+					},
+					this.pickedVia,
+				);
+				if (worktreeResult === StepResultBreak) continue;
+
+				endSteps(state);
+				return;
 			}
 
 			endSteps(state);
@@ -352,9 +402,15 @@ export class BranchGitCommand extends QuickCommand<State> {
 					detail: `Will create a new branch named ${state.name} from ${getReferenceLabel(state.reference)}`,
 				}),
 				createFlagsQuickPickItem<CreateFlags>(state.flags, ['--switch'], {
-					label: `${context.title} and Switch`,
-					description: '--switch',
+					label: `Create & Switch to Branch`,
 					detail: `Will create and switch to a new branch named ${state.name} from ${getReferenceLabel(
+						state.reference,
+					)}`,
+				}),
+				createFlagsQuickPickItem<CreateFlags>(state.flags, ['--worktree'], {
+					label: `${context.title} in New Worktree`,
+					description: 'avoids modifying your working tree',
+					detail: `Will create a new worktree for a new branch named ${state.name} from ${getReferenceLabel(
 						state.reference,
 					)}`,
 				}),
@@ -365,7 +421,8 @@ export class BranchGitCommand extends QuickCommand<State> {
 		return canPickStepContinue(step, state, selection) ? selection[0].item : StepResultBreak;
 	}
 
-	private async *deleteCommandSteps(state: DeleteStepState, context: Context): AsyncStepResultGenerator<void> {
+	private *deleteCommandSteps(state: DeleteStepState | PruneStepState, context: Context): StepResultGenerator<void> {
+		const prune = state.subcommand === 'prune';
 		if (state.flags == null) {
 			state.flags = [];
 		}
@@ -383,9 +440,14 @@ export class BranchGitCommand extends QuickCommand<State> {
 				context.title = getTitle('Branches', state.subcommand);
 
 				const result = yield* pickBranchesStep(state, context, {
-					filter: b => !b.current,
+					filter: prune ? b => !b.current && Boolean(b.upstream?.missing) : b => !b.current,
 					picked: state.references?.map(r => r.ref),
-					placeholder: 'Choose branches to delete',
+					placeholder: prune
+						? 'Choose branches with missing upstreams to delete'
+						: 'Choose branches to delete',
+					emptyPlaceholder: prune
+						? `No branches with missing upstreams in ${state.repo.formattedName}`
+						: undefined,
 					sort: { current: false, missingUpstream: true },
 				});
 				// Always break on the first step (so we will go back)
@@ -396,7 +458,7 @@ export class BranchGitCommand extends QuickCommand<State> {
 
 			context.title = getTitle(
 				pluralize('Branch', state.references.length, { only: true, plural: 'Branches' }),
-				state.subcommand,
+				state.subcommand === 'prune' ? 'delete' : state.subcommand,
 			);
 
 			assertStateStepDeleteBranches(state);
@@ -414,7 +476,9 @@ export class BranchGitCommand extends QuickCommand<State> {
 	}
 
 	private *deleteCommandConfirmStep(
-		state: DeleteStepState<ExcludeSome<DeleteState, 'references', GitBranchReference>>,
+		state:
+			| DeleteStepState<ExcludeSome<DeleteState, 'references', GitBranchReference>>
+			| PruneStepState<ExcludeSome<PruneState, 'references', GitBranchReference>>,
 		context: Context,
 	): StepResultGenerator<DeleteFlags[]> {
 		const confirmations: FlagsQuickPickItem<DeleteFlags>[] = [
@@ -432,7 +496,7 @@ export class BranchGitCommand extends QuickCommand<State> {
 				}),
 			);
 
-			if (state.references.some(b => b.upstream != null)) {
+			if (state.subcommand !== 'prune' && state.references.some(b => b.upstream != null)) {
 				confirmations.push(
 					createFlagsQuickPickItem<DeleteFlags>(state.flags, ['--remotes'], {
 						label: `${context.title} & Remote${
@@ -483,9 +547,6 @@ export class BranchGitCommand extends QuickCommand<State> {
 
 			if (state.counter < 4 || state.name == null) {
 				const result = yield* inputBranchNameStep(state, context, {
-					placeholder: `Please provide a new name for ${getReferenceLabel(state.reference, {
-						icon: false,
-					})}`,
 					titleContext: ` ${getReferenceLabel(state.reference, false)}`,
 					value: state.name ?? state.reference.name,
 				});

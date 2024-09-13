@@ -11,13 +11,13 @@ import { map } from '../../system/iterable';
 import { pluralize } from '../../system/string';
 import type { ContactPresence } from '../../vsls/vsls';
 import type { ViewsWithContributors } from '../viewBase';
+import type { ClipboardType, PageableViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 import { CommitNode } from './commitNode';
 import { LoadMoreNode, MessageNode } from './common';
 import { insertDateMarkers } from './helpers';
-import type { PageableViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class ContributorNode extends ViewNode<ViewsWithContributors> implements PageableViewNode {
+export class ContributorNode extends ViewNode<'contributor', ViewsWithContributors> implements PageableViewNode {
 	limit: number | undefined;
 
 	constructor(
@@ -25,16 +25,17 @@ export class ContributorNode extends ViewNode<ViewsWithContributors> implements 
 		view: ViewsWithContributors,
 		protected override readonly parent: ViewNode,
 		public readonly contributor: GitContributor,
-		private readonly _options?: {
+		private readonly options?: {
 			all?: boolean;
 			ref?: string;
 			presence: Map<string, ContactPresence> | undefined;
+			showMergeCommits?: boolean;
 		},
 	) {
-		super(uri, view, parent);
+		super('contributor', uri, view, parent);
 
 		this.updateContext({ contributor: contributor });
-		this._uniqueId = getViewNodeId('contributor', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 		this.limit = this.view.getNodeLastKnownLimit(this);
 	}
 
@@ -42,8 +43,18 @@ export class ContributorNode extends ViewNode<ViewsWithContributors> implements 
 		return this._uniqueId;
 	}
 
-	override toClipboard(): string {
-		return `${this.contributor.name}${this.contributor.email ? ` <${this.contributor.email}>` : ''}`;
+	override toClipboard(type?: ClipboardType): string {
+		const text = `${this.contributor.name}${this.contributor.email ? ` <${this.contributor.email}>` : ''}`;
+		switch (type) {
+			case 'markdown':
+				return this.contributor.email ? `[${text}](mailto:${this.contributor.email})` : text;
+			default:
+				return text;
+		}
+	}
+
+	override getUrl(): string {
+		return this.contributor.email ? `mailto:${this.contributor.email}` : '';
 	}
 
 	get repoPath(): string {
@@ -72,7 +83,7 @@ export class ContributorNode extends ViewNode<ViewsWithContributors> implements 
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
-		const presence = this._options?.presence?.get(this.contributor.email!);
+		const presence = this.options?.presence?.get(this.contributor.email!);
 
 		const item = new TreeItem(
 			this.contributor.current ? `${this.contributor.label} (you)` : this.contributor.label,
@@ -167,9 +178,10 @@ export class ContributorNode extends ViewNode<ViewsWithContributors> implements 
 	private async getLog() {
 		if (this._log == null) {
 			this._log = await this.view.container.git.getLog(this.uri.repoPath!, {
-				all: this._options?.all,
-				ref: this._options?.ref,
+				all: this.options?.all,
+				ref: this.options?.ref,
 				limit: this.limit ?? this.view.config.defaultItemLimit,
+				merges: this.options?.showMergeCommits,
 				authors: [
 					{
 						name: this.contributor.name,
@@ -196,7 +208,7 @@ export class ContributorNode extends ViewNode<ViewsWithContributors> implements 
 			},
 			() => this.getLog(),
 		);
-		if (log == null || !log.hasMore) return;
+		if (!log?.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
 		if (this._log === log) return;

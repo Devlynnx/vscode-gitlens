@@ -19,18 +19,20 @@ import type {
 	StepState,
 } from '../quickCommand';
 import {
-	appendReposToTitle,
 	canPickStepContinue,
 	createConfirmStep,
 	createPickStep,
 	endSteps,
+	QuickCommand,
+	StepResultBreak,
+} from '../quickCommand';
+import {
+	appendReposToTitle,
 	inputRemoteNameStep,
 	inputRemoteUrlStep,
 	pickRemoteStep,
 	pickRepositoryStep,
-	QuickCommand,
-	StepResultBreak,
-} from '../quickCommand';
+} from '../quickCommand.steps';
 
 interface Context {
 	repos: Repository[];
@@ -368,8 +370,6 @@ export class RemoteGitCommand extends QuickCommand<State> {
 			}
 
 			if (state.counter < 3 || state.remote == null) {
-				context.title = getTitle('Remotes', state.subcommand);
-
 				const result = yield* pickRemoteStep(state, context, {
 					picked: state.remote?.name,
 					placeholder: 'Choose remote to remove',

@@ -1,25 +1,23 @@
 /*global document window*/
 import './rebase.scss';
+import { Avatar, AvatarGroup, defineGkElement } from '@gitkraken/shared-web-components';
 import Sortable from 'sortablejs';
-import { onIpc } from '../../protocol';
+import type { IpcMessage } from '../../protocol';
 import type { RebaseEntry, RebaseEntryAction, State } from '../../rebase/protocol';
 import {
-	AbortCommandType,
-	ChangeEntryCommandType,
-	DidChangeNotificationType,
-	DisableCommandType,
-	MoveEntryCommandType,
-	ReorderCommandType,
-	SearchCommandType,
-	StartCommandType,
-	SwitchCommandType,
-	UpdateSelectionCommandType,
+	AbortCommand,
+	ChangeEntryCommand,
+	DidChangeNotification,
+	DisableCommand,
+	MoveEntryCommand,
+	ReorderCommand,
+	SearchCommand,
+	StartCommand,
+	SwitchCommand,
+	UpdateSelectionCommand,
 } from '../../rebase/protocol';
 import { App } from '../shared/appBase';
-import type { AvatarItem } from '../shared/components/avatars/avatar-item';
 import { DOM } from '../shared/dom';
-import '../shared/components/avatars/avatar-item';
-import '../shared/components/avatars/avatar-stack';
 
 const rebaseActions = ['pick', 'reword', 'edit', 'squash', 'fixup', 'drop'];
 const rebaseActionsMap = new Map<string, RebaseEntryAction>([
@@ -52,6 +50,7 @@ class RebaseEditor extends App<State> {
 	}
 
 	protected override onBind() {
+		defineGkElement(Avatar, AvatarGroup);
 		const disposables = super.onBind?.() ?? [];
 
 		const $container = document.getElementById('entries')!;
@@ -253,7 +252,7 @@ class RebaseEditor extends App<State> {
 	private moveEntry(sha: string, index: number, relative: boolean) {
 		const entry = this.getEntry(sha);
 		if (entry != null) {
-			this.sendCommand(MoveEntryCommandType, {
+			this.sendCommand(MoveEntryCommand, {
 				sha: entry.sha,
 				to: index,
 				relative: relative,
@@ -266,7 +265,7 @@ class RebaseEditor extends App<State> {
 		if (entry != null) {
 			if (entry.action === action) return;
 
-			this.sendCommand(ChangeEntryCommandType, {
+			this.sendCommand(ChangeEntryCommand, {
 				sha: entry.sha,
 				action: action,
 			});
@@ -274,15 +273,15 @@ class RebaseEditor extends App<State> {
 	}
 
 	private onAbortClicked() {
-		this.sendCommand(AbortCommandType, undefined);
+		this.sendCommand(AbortCommand, undefined);
 	}
 
 	private onDisableClicked() {
-		this.sendCommand(DisableCommandType, undefined);
+		this.sendCommand(DisableCommand, undefined);
 	}
 
 	private onSearch() {
-		this.sendCommand(SearchCommandType, undefined);
+		this.sendCommand(SearchCommand, undefined);
 	}
 
 	private onSelectChanged($el: HTMLSelectElement) {
@@ -293,23 +292,23 @@ class RebaseEditor extends App<State> {
 	}
 
 	private onStartClicked() {
-		this.sendCommand(StartCommandType, undefined);
+		this.sendCommand(StartCommand, undefined);
 	}
 
 	private onSwitchClicked() {
-		this.sendCommand(SwitchCommandType, undefined);
+		this.sendCommand(SwitchCommand, undefined);
 	}
 
 	private onOrderChanged($el: HTMLInputElement) {
 		const isChecked = $el.checked;
 
-		this.sendCommand(ReorderCommandType, { ascending: isChecked });
+		this.sendCommand(ReorderCommand, { ascending: isChecked });
 	}
 
 	private onSelectionChanged(sha: string | undefined) {
 		if (sha == null) return;
 
-		this.sendCommand(UpdateSelectionCommandType, { sha: sha });
+		this.sendCommand(UpdateSelectionCommand, { sha: sha });
 	}
 
 	private setSelectedEntry(sha: string, focusSelect: boolean = false) {
@@ -318,22 +317,16 @@ class RebaseEditor extends App<State> {
 		});
 	}
 
-	protected override onMessageReceived(e: MessageEvent) {
-		const msg = e.data;
-
-		switch (msg.method) {
-			case DidChangeNotificationType.method:
-				this.log(`onMessageReceived(${msg.id}): name=${msg.method}`);
-
-				onIpc(DidChangeNotificationType, msg, params => {
-					this.state = params.state;
-					this.setState(this.state);
-					this.refresh(this.state);
-				});
+	protected override onMessageReceived(msg: IpcMessage) {
+		switch (true) {
+			case DidChangeNotification.is(msg):
+				this.state = msg.params.state;
+				this.setState(this.state);
+				this.refresh(this.state);
 				break;
 
 			default:
-				super.onMessageReceived?.(e);
+				super.onMessageReceived?.(msg);
 		}
 	}
 
@@ -508,14 +501,14 @@ class RebaseEditor extends App<State> {
 				const author = state.authors[commit.author];
 				const committer = state.authors[commit.committer];
 				if (author?.avatarUrl != null || committer?.avatarUrl != null) {
-					const $avatarStack = document.createElement('avatar-stack');
+					const $avatarStack = document.createElement('gk-avatar-group');
 					$avatarStack.classList.add('entry-avatar');
 
 					const hasAuthor = author?.avatarUrl.length;
 					const hasCommitter = author !== committer && author.author !== 'You' && committer?.avatarUrl.length;
 					if (hasAuthor) {
-						const $avatar = document.createElement('avatar-item') as AvatarItem;
-						$avatar.media = author.avatarUrl;
+						const $avatar = document.createElement('gk-avatar');
+						$avatar.src = author.avatarUrl;
 						$avatar.ariaLabel = $avatar.title = hasCommitter
 							? `Authored by: ${author.author}`
 							: author.author;
@@ -523,8 +516,8 @@ class RebaseEditor extends App<State> {
 					}
 
 					if (hasCommitter) {
-						const $avatar = document.createElement('avatar-item') as AvatarItem;
-						$avatar.media = committer.avatarUrl;
+						const $avatar = document.createElement('gk-avatar');
+						$avatar.src = committer.avatarUrl;
 						$avatar.ariaLabel = $avatar.title = hasAuthor
 							? `Committed by: ${committer.author}`
 							: committer.author;

@@ -19,19 +19,18 @@ export class ViewFileDecorationProvider implements FileDecorationProvider, Dispo
 				provideFileDecoration: (uri, token) => {
 					if (uri.scheme !== 'gitlens-view') return undefined;
 
-					if (uri.authority === 'branch') {
-						return this.provideBranchCurrentDecoration(uri, token);
+					switch (uri.authority) {
+						case 'branch':
+							return this.provideBranchDecoration(uri, token);
+						case 'remote':
+							return this.provideRemoteDefaultDecoration(uri, token);
+						case 'status':
+							return this.provideStatusDecoration(uri, token);
+						case 'workspaces':
+							return this.provideWorkspaceDecoration(uri, token);
+						default:
+							return undefined;
 					}
-
-					if (uri.authority === 'remote') {
-						return this.provideRemoteDefaultDecoration(uri, token);
-					}
-
-					if (uri.authority === 'workspaces') {
-						return this.provideWorkspaceDecoration(uri, token);
-					}
-
-					return undefined;
 				},
 			}),
 			window.registerFileDecorationProvider(this),
@@ -148,9 +147,10 @@ export class ViewFileDecorationProvider implements FileDecorationProvider, Dispo
 	}
 
 	provideBranchStatusDecoration(uri: Uri, _token: CancellationToken): FileDecoration | undefined {
-		const [, , status] = uri.path.split('/');
+		const query = new URLSearchParams(uri.query);
+		const status = query.get('status')! as GitBranchStatus;
 
-		switch (status as GitBranchStatus) {
+		switch (status) {
 			case 'ahead':
 				return {
 					badge: '▲',
@@ -192,13 +192,17 @@ export class ViewFileDecorationProvider implements FileDecorationProvider, Dispo
 		}
 	}
 
-	provideBranchCurrentDecoration(uri: Uri, _token: CancellationToken): FileDecoration | undefined {
-		const [, , status, current] = uri.path.split('/');
+	provideBranchDecoration(uri: Uri, _token: CancellationToken): FileDecoration | undefined {
+		const query = new URLSearchParams(uri.query);
 
-		if (!current) return undefined;
+		const current = Boolean(query.get('current'));
+		const opened = Boolean(query.get('opened'));
+		const status = query.get('status')! as GitBranchStatus;
+
+		if (!current && !opened) return undefined;
 
 		let color;
-		switch (status as GitBranchStatus) {
+		switch (status) {
 			case 'ahead':
 				color = new ThemeColor('gitlens.decorations.branchAheadForegroundColor' satisfies Colors);
 				break;
@@ -219,7 +223,7 @@ export class ViewFileDecorationProvider implements FileDecorationProvider, Dispo
 		return {
 			badge: GlyphChars.Check,
 			color: color,
-			tooltip: 'Current Branch',
+			tooltip: current ? 'Current Branch' : 'Opened Worktree Branch',
 		};
 	}
 
@@ -232,5 +236,29 @@ export class ViewFileDecorationProvider implements FileDecorationProvider, Dispo
 			badge: GlyphChars.Check,
 			tooltip: 'Default Remote',
 		};
+	}
+
+	provideStatusDecoration(uri: Uri, _token: CancellationToken): FileDecoration | undefined {
+		const [, status, conflicts] = uri.path.split('/');
+
+		switch (status) {
+			case 'rebasing':
+			case 'merging':
+				if (conflicts) {
+					return {
+						badge: '!',
+						color: new ThemeColor(
+							'gitlens.decorations.statusMergingOrRebasingConflictForegroundColor' satisfies Colors,
+						),
+					};
+				}
+				return {
+					color: new ThemeColor(
+						'gitlens.decorations.statusMergingOrRebasingForegroundColor' satisfies Colors,
+					),
+				};
+			default:
+				return undefined;
+		}
 	}
 }

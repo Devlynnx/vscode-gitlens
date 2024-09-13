@@ -33,11 +33,13 @@ export function ensure<T>(source: T | T[] | undefined): T[] | undefined {
 }
 
 export async function filterAsync<T>(source: T[], predicate: (item: T) => Promise<boolean>): Promise<T[]> {
+	const predicates = source.map<Promise<[boolean, T]>>(i => predicate(i).then(r => [r, i]));
+
 	const filtered = [];
-	for (const item of source) {
-		if (await predicate(item)) {
-			filtered.push(item);
-		}
+	for await (const [include, item] of predicates) {
+		if (!include) continue;
+
+		filtered.push(item);
 	}
 	return filtered;
 }
@@ -60,12 +62,13 @@ export async function filterMapAsync<T, TMapped>(
 	source: T[],
 	predicateMapper: (item: T) => Promise<TMapped | null | undefined>,
 ): Promise<TMapped[]> {
+	const items = source.map(predicateMapper);
+
 	const filteredAndMapped = [];
-	for (const item of source) {
-		const mapped = await predicateMapper(item);
-		if (mapped != null) {
-			filteredAndMapped.push(mapped);
-		}
+	for await (const item of items) {
+		if (item == null) continue;
+
+		filteredAndMapped.push(item);
 	}
 	return filteredAndMapped;
 }
@@ -76,55 +79,6 @@ export function findLastIndex<T>(source: T[], predicate: (value: T, index: numbe
 		if (predicate(source[l], l, source)) return l;
 	}
 	return -1;
-}
-
-export function groupBy<T>(source: readonly T[], groupingKey: (item: T) => string): Record<string, T[]> {
-	return source.reduce<Record<string, T[]>>((groupings, current) => {
-		const value = groupingKey(current);
-		const group = groupings[value];
-		if (group === undefined) {
-			groupings[value] = [current];
-		} else {
-			group.push(current);
-		}
-		return groupings;
-	}, Object.create(null));
-}
-
-export function groupByMap<TKey, TValue>(
-	source: readonly TValue[],
-	groupingKey: (item: TValue) => TKey,
-): Map<TKey, TValue[]> {
-	return source.reduce((groupings, current) => {
-		const value = groupingKey(current);
-		const group = groupings.get(value);
-		if (group === undefined) {
-			groupings.set(value, [current]);
-		} else {
-			group.push(current);
-		}
-		return groupings;
-	}, new Map<TKey, TValue[]>());
-}
-
-export function groupByFilterMap<TKey, TValue, TMapped>(
-	source: readonly TValue[],
-	groupingKey: (item: TValue) => TKey,
-	predicateMapper: (item: TValue) => TMapped | null | undefined,
-): Map<TKey, TMapped[]> {
-	return source.reduce((groupings, current) => {
-		const mapped = predicateMapper(current);
-		if (mapped != null) {
-			const value = groupingKey(current);
-			const group = groupings.get(value);
-			if (group === undefined) {
-				groupings.set(value, [mapped]);
-			} else {
-				group.push(mapped);
-			}
-		}
-		return groupings;
-	}, new Map<TKey, TMapped[]>());
 }
 
 export function intersection<T>(sources: T[][], comparator: (a: T, b: T) => boolean): T[] {
@@ -250,27 +204,22 @@ export function joinUnique<T>(source: readonly T[], separator: string): string {
 	return join(new Set(source), separator);
 }
 
-export function splitAt<T>(source: T[], index: number): [T[], T[]] {
-	return index < 0 ? [source, []] : [source.slice(0, index), source.slice(index)];
+export async function mapAsync<T, TMapped>(
+	source: T[],
+	mapper: (item: T) => TMapped | Promise<TMapped>,
+	predicate?: (item: TMapped) => boolean,
+): Promise<NonNullable<TMapped>[]> {
+	const items = source.map(mapper);
+
+	const mapped = [];
+	for await (const item of items) {
+		if (item == null || (predicate != null && !predicate(item))) continue;
+
+		mapped.push(item);
+	}
+	return mapped;
 }
 
-export function uniqueBy<TKey, TValue>(
-	source: readonly TValue[],
-	uniqueKey: (item: TValue) => TKey,
-	onDuplicate: (original: TValue, current: TValue) => TValue | void,
-): TValue[] {
-	const map = source.reduce((uniques, current) => {
-		const value = uniqueKey(current);
-		const original = uniques.get(value);
-		if (original === undefined) {
-			uniques.set(value, current);
-		} else {
-			const updated = onDuplicate(original, current);
-			if (updated !== undefined) {
-				uniques.set(value, updated);
-			}
-		}
-		return uniques;
-	}, new Map<TKey, TValue>());
-	return [...map.values()];
+export function splitAt<T>(source: T[], index: number): [T[], T[]] {
+	return index < 0 ? [source, []] : [source.slice(0, index), source.slice(index)];
 }

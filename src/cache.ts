@@ -1,22 +1,24 @@
 // import type { EnrichedAutolink } from './annotations/autolinks';
 import type { Disposable } from './api/gitlens';
 import type { Container } from './container';
+import type { Account } from './git/models/author';
 import type { DefaultBranch } from './git/models/defaultBranch';
 import type { IssueOrPullRequest } from './git/models/issue';
 import type { PullRequest } from './git/models/pullRequest';
-import type { GitRemote } from './git/models/remote';
 import type { RepositoryMetadata } from './git/models/repositoryMetadata';
-import type { RemoteProvider } from './git/remotes/remoteProvider';
-import type { RichRemoteProvider } from './git/remotes/richRemoteProvider';
+import type { HostingIntegration, IntegrationBase, ResourceDescriptor } from './plus/integrations/integration';
 import { isPromise } from './system/promise';
 
 type Caches = {
 	defaultBranch: { key: `repo:${string}`; value: DefaultBranch };
 	// enrichedAutolinksBySha: { key: `sha:${string}:${string}`; value: Map<string, EnrichedAutolink> };
 	issuesOrPrsById: { key: `id:${string}:${string}`; value: IssueOrPullRequest };
+	issuesOrPrsByIdAndRepo: { key: `id:${string}:${string}:${string}`; value: IssueOrPullRequest };
 	prByBranch: { key: `branch:${string}:${string}`; value: PullRequest };
+	prsById: { key: `id:${string}:${string}`; value: PullRequest };
 	prsBySha: { key: `sha:${string}:${string}`; value: PullRequest };
 	repoMetadata: { key: `repo:${string}`; value: RepositoryMetadata };
+	currentAccount: { key: `id:${string}`; value: Account };
 };
 
 type Cache = keyof Caches;
@@ -28,11 +30,13 @@ type Cacheable<T> = () => { value: CacheResult<T>; expiresAt?: number };
 type Cached<T> =
 	| {
 			value: T | undefined;
+			cachedAt: number;
 			expiresAt?: number;
 			etag?: string;
 	  }
 	| {
 			value: Promise<T | undefined>;
+			cachedAt: number;
 			expiresAt?: never; // Don't set an expiration on promises as they will resolve to a value with the desired expiration
 			etag?: string;
 	  };
@@ -56,12 +60,24 @@ export class CacheProvider implements Disposable {
 		key: CacheKey<T>,
 		etag: string | undefined,
 		cacheable: Cacheable<CacheValue<T>>,
+		options?: { expiryOverride?: boolean | number },
 	): CacheResult<CacheValue<T>> {
 		const item = this._cache.get(`${cache}:${key}`);
 
+		// Allow the caller to override the expiry
+		let expiry;
+		if (item != null) {
+			if (typeof options?.expiryOverride === 'number' && options.expiryOverride > 0) {
+				expiry = item.cachedAt + options.expiryOverride;
+			} else {
+				expiry = item.expiresAt;
+			}
+		}
+
 		if (
 			item == null ||
-			(item.expiresAt != null && item.expiresAt > 0 && item.expiresAt < Date.now()) ||
+			options?.expiryOverride === true ||
+			(expiry != null && expiry > 0 && expiry < Date.now()) ||
 			(item.etag != null && item.etag !== etag)
 		) {
 			const { value, expiresAt } = cacheable();
@@ -71,60 +87,115 @@ export class CacheProvider implements Disposable {
 		return item.value as CacheResult<CacheValue<T>>;
 	}
 
-	getIssueOrPullRequest(
-		id: string,
-		remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
-		cacheable: Cacheable<IssueOrPullRequest>,
-	): CacheResult<IssueOrPullRequest> {
-		const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
-		return this.get('issuesOrPrsById', `id:${id}:${key}`, etag, cacheable);
+	getCurrentAccount(
+		integration: IntegrationBase,
+		cacheable: Cacheable<Account>,
+		options?: { expiryOverride?: boolean | number },
+	): CacheResult<Account> {
+		const { key, etag } = getIntegrationKeyAndEtag(integration);
+		return this.get('currentAccount', `id:${key}`, etag, cacheable, options);
 	}
 
 	// getEnrichedAutolinks(
 	// 	sha: string,
-	// 	remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
+	// 	remoteOrProvider: Integration,
 	// 	cacheable: Cacheable<Map<string, EnrichedAutolink>>,
+	// 	options?: { force?: boolean },
 	// ): CacheResult<Map<string, EnrichedAutolink>> {
 	// 	const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
-	// 	return this.get('enrichedAutolinksBySha', `sha:${sha}:${key}`, etag, cacheable);
+	// 	return this.get('enrichedAutolinksBySha', `sha:${sha}:${key}`, etag, cacheable, options);
 	// }
+
+	getIssueOrPullRequest(
+		id: string,
+		resource: ResourceDescriptor,
+		integration: IntegrationBase | undefined,
+		cacheable: Cacheable<IssueOrPullRequest>,
+		options?: { expiryOverride?: boolean | number },
+	): CacheResult<IssueOrPullRequest> {
+		const { key, etag } = getResourceKeyAndEtag(resource, integration);
+
+		if (resource == null) {
+			return this.get('issuesOrPrsById', `id:${id}:${key}`, etag, cacheable, options);
+		}
+		return this.get(
+			'issuesOrPrsByIdAndRepo',
+			`id:${id}:${key}:${JSON.stringify(resource)}}`,
+			etag,
+			cacheable,
+			options,
+		);
+	}
+
+	getPullRequest(
+		id: string,
+		resource: ResourceDescriptor,
+		integration: IntegrationBase | undefined,
+		cacheable: Cacheable<PullRequest>,
+		options?: { expiryOverride?: boolean | number },
+	): CacheResult<PullRequest> {
+		const { key, etag } = getResourceKeyAndEtag(resource, integration);
+
+		if (resource == null) {
+			return this.get('prsById', `id:${id}:${key}`, etag, cacheable, options);
+		}
+		return this.get('prsById', `id:${id}:${key}:${JSON.stringify(resource)}}`, etag, cacheable, options);
+	}
 
 	getPullRequestForBranch(
 		branch: string,
-		remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
+		repo: ResourceDescriptor,
+		integration: HostingIntegration | undefined,
 		cacheable: Cacheable<PullRequest>,
+		options?: { expiryOverride?: boolean | number },
 	): CacheResult<PullRequest> {
-		const cache = 'prByBranch';
-		const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
+		const { key, etag } = getResourceKeyAndEtag(repo, integration);
 		// Wrap the cacheable so we can also add the result to the issuesOrPrsById cache
-		return this.get(cache, `branch:${branch}:${key}`, etag, this.wrapPullRequestCacheable(cacheable, key, etag));
+		return this.get(
+			'prByBranch',
+			`branch:${branch}:${key}`,
+			etag,
+			this.wrapPullRequestCacheable(cacheable, key, etag),
+			options,
+		);
 	}
 
 	getPullRequestForSha(
 		sha: string,
-		remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
+		repo: ResourceDescriptor,
+		integration: HostingIntegration | undefined,
 		cacheable: Cacheable<PullRequest>,
+		options?: { expiryOverride?: boolean | number },
 	): CacheResult<PullRequest> {
-		const cache = 'prsBySha';
-		const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
+		const { key, etag } = getResourceKeyAndEtag(repo, integration);
 		// Wrap the cacheable so we can also add the result to the issuesOrPrsById cache
-		return this.get(cache, `sha:${sha}:${key}`, etag, this.wrapPullRequestCacheable(cacheable, key, etag));
+		return this.get(
+			'prsBySha',
+			`sha:${sha}:${key}`,
+			etag,
+			this.wrapPullRequestCacheable(cacheable, key, etag),
+			options,
+		);
 	}
 
 	getRepositoryDefaultBranch(
-		remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
+		repo: ResourceDescriptor,
+		integration: HostingIntegration | undefined,
 		cacheable: Cacheable<DefaultBranch>,
+		options?: { expiryOverride?: boolean | number },
 	): CacheResult<DefaultBranch> {
-		const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
-		return this.get('defaultBranch', `repo:${key}`, etag, cacheable);
+		const { key, etag } = getResourceKeyAndEtag(repo, integration);
+		return this.get('defaultBranch', `repo:${key}`, etag, cacheable, options);
 	}
 
 	getRepositoryMetadata(
-		remoteOrProvider: RichRemoteProvider | GitRemote<RichRemoteProvider>,
+		repo: ResourceDescriptor,
+		integration: HostingIntegration | undefined,
 		cacheable: Cacheable<RepositoryMetadata>,
+		options?: { expiryOverride?: boolean | number },
 	): CacheResult<RepositoryMetadata> {
-		const { key, etag } = getRemoteKeyAndEtag(remoteOrProvider);
-		return this.get('repoMetadata', `repo:${key}`, etag, cacheable);
+		const { key, etag } = getResourceKeyAndEtag(repo, integration);
+		return this.get('repoMetadata', `repo:${key}`, etag, cacheable, options);
 	}
 
 	private set<T extends Cache>(
@@ -145,9 +216,14 @@ export class CacheProvider implements Disposable {
 				},
 			);
 
-			item = { value: value, etag: etag };
+			item = { value: value, etag: etag, cachedAt: Date.now() };
 		} else {
-			item = { value: value, etag: etag, expiresAt: expiresAt ?? getExpiresAt<T>(cache, value) };
+			item = {
+				value: value,
+				etag: etag,
+				cachedAt: Date.now(),
+				expiresAt: expiresAt ?? getExpiresAt<T>(cache, value),
+			};
 		}
 
 		this._cache.set(`${cache}:${key}`, item);
@@ -181,8 +257,10 @@ function getExpiresAt<T extends Cache>(cache: T, value: CacheValue<T> | undefine
 	switch (cache) {
 		case 'defaultBranch':
 		case 'repoMetadata':
+		case 'currentAccount':
 			return 0; // Never expires
-		case 'issuesOrPrsById': {
+		case 'issuesOrPrsById':
+		case 'issuesOrPrsByIdAndRepo': {
 			if (value == null) return 0; // Never expires
 
 			// Open issues expire after 1 hour, but closed issues expire after 12 hours unless recently updated and then expire in 1 hour
@@ -190,19 +268,20 @@ function getExpiresAt<T extends Cache>(cache: T, value: CacheValue<T> | undefine
 			const issueOrPr = value as CacheValue<'issuesOrPrsById'>;
 			if (!issueOrPr.closed) return defaultExpiresAt;
 
-			const updatedAgo = now - (issueOrPr.closedDate ?? issueOrPr.date).getTime();
+			const updatedAgo = now - (issueOrPr.closedDate ?? issueOrPr.updatedDate).getTime();
 			return now + (updatedAgo > 14 * 24 * 60 * 60 * 1000 ? 12 : 1) * 60 * 60 * 1000;
 		}
 		case 'prByBranch':
+		case 'prsById':
 		case 'prsBySha': {
 			if (value == null) return cache === 'prByBranch' ? defaultExpiresAt : 0 /* Never expires */;
 
 			// Open prs expire after 1 hour, but closed/merge prs expire after 12 hours unless recently updated and then expire in 1 hour
 
-			const pr = value as CacheValue<'prsBySha'>;
+			const pr = value as CacheValue<'prByBranch' | 'prsById' | 'prsBySha'>;
 			if (pr.state === 'opened') return defaultExpiresAt;
 
-			const updatedAgo = now - (pr.closedDate ?? pr.mergedDate ?? pr.date).getTime();
+			const updatedAgo = now - (pr.closedDate ?? pr.mergedDate ?? pr.updatedDate).getTime();
 			return now + (updatedAgo > 14 * 24 * 60 * 60 * 1000 ? 12 : 1) * 60 * 60 * 1000;
 		}
 		// case 'enrichedAutolinksBySha':
@@ -211,11 +290,10 @@ function getExpiresAt<T extends Cache>(cache: T, value: CacheValue<T> | undefine
 	}
 }
 
-function getRemoteKeyAndEtag(remoteOrProvider: RemoteProvider | GitRemote<RichRemoteProvider>) {
-	return {
-		key: remoteOrProvider.remoteKey,
-		etag: remoteOrProvider.hasRichIntegration()
-			? `${remoteOrProvider.remoteKey}:${remoteOrProvider.maybeConnected ?? false}`
-			: remoteOrProvider.remoteKey,
-	};
+function getResourceKeyAndEtag(resource: ResourceDescriptor, integration?: HostingIntegration | IntegrationBase) {
+	return { key: resource.key, etag: `${resource.key}:${integration?.maybeConnected ?? false}` };
+}
+
+function getIntegrationKeyAndEtag(integration: IntegrationBase) {
+	return { key: integration.id, etag: `${integration.id}:${integration.maybeConnected ?? false}` };
 }

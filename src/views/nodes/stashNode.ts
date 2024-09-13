@@ -1,29 +1,32 @@
-import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
+import type { CancellationToken } from 'vscode';
+import { MarkdownString, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { CommitFormatter } from '../../git/formatters/commitFormatter';
 import type { GitStashCommit } from '../../git/models/commit';
 import type { GitStashReference } from '../../git/models/reference';
 import { makeHierarchical } from '../../system/array';
 import { configuration } from '../../system/configuration';
 import { joinPaths, normalizePath } from '../../system/path';
+import { getSettledValue, pauseOnCancelOrTimeoutMapTuplePromise } from '../../system/promise';
 import { sortCompare } from '../../system/string';
 import type { ViewsWithStashes } from '../viewBase';
+import type { ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
+import { ViewRefNode } from './abstract/viewRefNode';
 import type { FileNode } from './folderNode';
 import { FolderNode } from './folderNode';
 import { StashFileNode } from './stashFileNode';
-import type { ViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, ViewRefNode } from './viewNode';
 
-export class StashNode extends ViewRefNode<ViewsWithStashes, GitStashReference> {
+export class StashNode extends ViewRefNode<'stash', ViewsWithStashes, GitStashReference> {
 	constructor(
 		view: ViewsWithStashes,
 		protected override parent: ViewNode,
 		public readonly commit: GitStashCommit,
 		private readonly options?: { icon?: boolean },
 	) {
-		super(commit.getGitUri(), view, parent);
+		super('stash', commit.getGitUri(), view, parent);
 
 		this.updateContext({ commit: commit });
-		this._uniqueId = getViewNodeId('stash', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
@@ -76,15 +79,60 @@ export class StashNode extends ViewRefNode<ViewsWithStashes, GitStashReference> 
 		if (this.options?.icon) {
 			item.iconPath = new ThemeIcon('archive');
 		}
-		item.tooltip = CommitFormatter.fromTemplate(
-			`\${'On 'stashOnRef\n}\${ago} (\${date})\n\n\${message}`,
+
+		return item;
+	}
+
+	override async resolveTreeItem(item: TreeItem, token: CancellationToken): Promise<TreeItem> {
+		if (item.tooltip == null) {
+			item.tooltip = await this.getTooltip(token);
+		}
+		return item;
+	}
+
+	private async getTooltip(cancellation: CancellationToken) {
+		const [remotesResult, _] = await Promise.allSettled([
+			this.view.container.git.getBestRemotesWithProviders(this.commit.repoPath, cancellation),
+			this.commit.message == null ? this.commit.ensureFullDetails() : undefined,
+		]);
+
+		if (cancellation.isCancellationRequested) return undefined;
+
+		const remotes = getSettledValue(remotesResult, []);
+		const [remote] = remotes;
+
+		let enrichedAutolinks;
+
+		if (remote?.hasIntegration()) {
+			const [enrichedAutolinksResult] = await Promise.allSettled([
+				pauseOnCancelOrTimeoutMapTuplePromise(this.commit.getEnrichedAutolinks(remote), cancellation),
+			]);
+
+			if (cancellation.isCancellationRequested) return undefined;
+
+			const enrichedAutolinksMaybeResult = getSettledValue(enrichedAutolinksResult);
+			if (!enrichedAutolinksMaybeResult?.paused) {
+				enrichedAutolinks = enrichedAutolinksMaybeResult?.value;
+			}
+		}
+
+		const tooltip = await CommitFormatter.fromTemplateAsync(
+			configuration.get('views.formats.stashes.tooltip'),
 			this.commit,
 			{
+				enrichedAutolinks: enrichedAutolinks,
 				dateFormat: configuration.get('defaultDateFormat'),
-				// messageAutolinks: true,
+				messageAutolinks: true,
+				messageIndent: 4,
+				outputFormat: 'markdown',
+				remotes: remotes,
 			},
 		);
 
-		return item;
+		const markdown = new MarkdownString(tooltip, true);
+		markdown.supportHtml = true;
+		markdown.isTrusted = true;
+
+		return markdown;
 	}
 }

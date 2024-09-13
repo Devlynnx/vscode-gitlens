@@ -1,28 +1,30 @@
 import type { CancellationToken, ConfigurationChangeEvent, Event, Uri, WorkspaceFolder } from 'vscode';
 import { Disposable, EventEmitter, ProgressLocation, RelativePattern, window, workspace } from 'vscode';
-import { md5 } from '@env/crypto';
-import { ForcePushMode } from '../../@types/vscode.git.enums';
+import { md5, uuid } from '@env/crypto';
 import type { CreatePullRequestActionContext } from '../../api/gitlens';
-import type { CoreGitConfiguration } from '../../constants';
+import type { RepositoriesSorting } from '../../config';
 import { Schemes } from '../../constants';
 import type { Container } from '../../container';
 import type { FeatureAccess, Features, PlusFeatures } from '../../features';
 import { showCreatePullRequestPrompt, showGenericErrorMessage } from '../../messages';
+import type { HostingIntegration } from '../../plus/integrations/integration';
+import type { RepoComparisonKey } from '../../repositories';
 import { asRepoComparisonKey } from '../../repositories';
-import { groupByMap } from '../../system/array';
-import { executeActionCommand, executeCoreGitCommand } from '../../system/command';
+import { executeActionCommand } from '../../system/command';
 import { configuration } from '../../system/configuration';
 import { formatDate, fromNow } from '../../system/date';
 import { gate } from '../../system/decorators/gate';
 import { debug, log, logName } from '../../system/decorators/log';
+import type { Deferrable } from '../../system/function';
 import { debounce } from '../../system/function';
-import { filter, join, some } from '../../system/iterable';
+import { filter, groupByMap, join, map, min, some } from '../../system/iterable';
 import { getLoggableName, Logger } from '../../system/logger';
 import { getLogScope } from '../../system/logger.scope';
 import { updateRecordValue } from '../../system/object';
 import { basename, normalizePath } from '../../system/path';
-import type { GitDir, GitProviderDescriptor, GitRepositoryCaches } from '../gitProvider';
-import type { RichRemoteProvider } from '../remotes/richRemoteProvider';
+import { sortCompare } from '../../system/string';
+import type { GitDir, GitProviderDescriptor, GitRepositoryCaches, PagingOptions } from '../gitProvider';
+import type { RemoteProvider } from '../remotes/remoteProvider';
 import type { GitSearch, SearchQuery } from '../search';
 import type { BranchSortOptions, GitBranch } from './branch';
 import { getBranchNameWithoutRemote, getRemoteNameFromBranchName } from './branch';
@@ -39,6 +41,10 @@ import type { GitStash } from './stash';
 import type { GitStatus } from './status';
 import type { GitTag, TagSortOptions } from './tag';
 import type { GitWorktree } from './worktree';
+
+export interface RepositoriesSortOptions {
+	orderBy?: RepositoriesSorting;
+}
 
 const emptyArray = Object.freeze([]) as unknown as any[];
 
@@ -66,9 +72,7 @@ export const enum RepositoryChange {
 	Remotes = 5,
 	Worktrees = 6,
 	Config = 7,
-	/*
-	 * Union of Cherry, Merge, and Rebase
-	 */
+	/** Union of Cherry, Merge, and Rebase */
 	Status = 8,
 	CherryPick = 9,
 	Merge = 10,
@@ -84,9 +88,11 @@ export const enum RepositoryChange {
 
 export const enum RepositoryChangeComparisonMode {
 	Any,
-	All,
 	Exclusive,
 }
+
+const defaultFileSystemChangeDelay = 2500;
+const defaultRepositoryChangeDelay = 250;
 
 export class RepositoryChangeEvent {
 	private readonly _changes: Set<RepositoryChange>;
@@ -175,8 +181,32 @@ export class Repository implements Disposable {
 			: 0;
 	}
 
-	static sort(repositories: Repository[]) {
-		return repositories.sort((a, b) => (a.starred ? -1 : 1) - (b.starred ? -1 : 1) || a.index - b.index);
+	static sort(repositories: Repository[], options?: RepositoriesSortOptions) {
+		options = { orderBy: configuration.get('sortRepositoriesBy'), ...options };
+
+		switch (options.orderBy) {
+			case 'name:asc':
+				return repositories.sort(
+					(a, b) => (a.starred ? -1 : 1) - (b.starred ? -1 : 1) || sortCompare(a.name, b.name),
+				);
+			case 'name:desc':
+				return repositories.sort(
+					(a, b) => (a.starred ? -1 : 1) - (b.starred ? -1 : 1) || sortCompare(b.name, a.name),
+				);
+			case 'lastFetched:asc':
+				return repositories.sort(
+					(a, b) =>
+						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) || (a._lastFetched ?? 0) - (b._lastFetched ?? 0),
+				);
+			case 'lastFetched:desc':
+				return repositories.sort(
+					(a, b) =>
+						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) || (b._lastFetched ?? 0) - (a._lastFetched ?? 0),
+				);
+			case 'discovered':
+			default:
+				return repositories;
+		}
 	}
 
 	private _onDidChange = new EventEmitter<RepositoryChangeEvent>();
@@ -194,9 +224,13 @@ export class Repository implements Disposable {
 		return this.name;
 	}
 
-	readonly id: string;
+	readonly id: RepoComparisonKey;
 	readonly index: number;
-	readonly name: string;
+
+	private _name: string;
+	get name(): string {
+		return this._name;
+	}
 
 	private _idHash: string | undefined;
 	get idHash() {
@@ -208,10 +242,8 @@ export class Repository implements Disposable {
 
 	private _branch: Promise<GitBranch | undefined> | undefined;
 	private readonly _disposable: Disposable;
-	private _fireChangeDebounced: (() => void) | undefined = undefined;
-	private _fireFileSystemChangeDebounced: (() => void) | undefined = undefined;
-	private _fsWatchCounter = 0;
-	private _fsWatcherDisposable: Disposable | undefined;
+	private _fireChangeDebounced: Deferrable<() => void> | undefined = undefined;
+	private _fireFileSystemChangeDebounced: Deferrable<() => void> | undefined = undefined;
 	private _pendingFileSystemChange?: RepositoryFileSystemChangeEvent;
 	private _pendingRepoChange?: RepositoryChangeEvent;
 	private _suspended: boolean;
@@ -226,16 +258,15 @@ export class Repository implements Disposable {
 		suspended: boolean,
 		closed: boolean = false,
 	) {
-		folder = workspace.getWorkspaceFolder(uri) ?? folder;
 		if (folder != null) {
 			if (root) {
-				this.name = folder.name;
+				this._name = folder.name;
 			} else {
 				const relativePath = container.git.getRelativePath(uri, folder.uri);
-				this.name = relativePath ? relativePath : folder.name;
+				this._name = relativePath ? relativePath : folder.name;
 			}
 		} else {
-			this.name = basename(uri.path);
+			this._name = basename(uri.path);
 
 			// TODO@eamodio should we create a fake workspace folder?
 			// folder = {
@@ -244,6 +275,22 @@ export class Repository implements Disposable {
 			// 	index: container.git.repositoryCount,
 			// };
 		}
+
+		// Update the name if it is a worktree
+		void this.getGitDir().then(gd => {
+			if (gd?.commonUri == null) return;
+
+			let path = gd.commonUri.path;
+			if (path.endsWith('/.git')) {
+				path = path.substring(0, path.length - 5);
+			}
+
+			const prefix = `${basename(path)}: `;
+			if (!this._name.startsWith(prefix)) {
+				this._name = `${prefix}${this._name}`;
+			}
+		});
+
 		this.index = folder?.index ?? container.git.repositoryCount;
 
 		this.id = asRepoComparisonKey(uri);
@@ -270,6 +317,9 @@ export class Repository implements Disposable {
 		);
 
 		this.onConfigurationChanged();
+		if (this._orderByLastFetched) {
+			void this.getLastFetched();
+		}
 	}
 
 	private setupRepoWatchers() {
@@ -336,13 +386,13 @@ export class Repository implements Disposable {
 	}
 
 	dispose() {
-		this.stopWatchingFileSystem();
+		this.unWatchFileSystem(true);
 
 		this._disposable.dispose();
 	}
 
 	toString(): string {
-		return `${getLoggableName(this)}(${this.id})`;
+		return getLoggableName(this);
 	}
 
 	get virtual(): boolean {
@@ -357,12 +407,21 @@ export class Repository implements Disposable {
 		return this._updatedAt;
 	}
 
+	private _orderByLastFetched = false;
+	get orderByLastFetched(): boolean {
+		return this._orderByLastFetched;
+	}
+
 	private _updatedAt: number = 0;
 	get updatedAt(): number {
 		return this._updatedAt;
 	}
 
 	private onConfigurationChanged(e?: ConfigurationChangeEvent) {
+		if (configuration.changed(e, 'sortRepositoriesBy')) {
+			this._orderByLastFetched = configuration.get('sortRepositoriesBy')?.startsWith('lastFetched:') ?? false;
+		}
+
 		if (e != null && configuration.changed(e, 'remotes', this.folder?.uri)) {
 			this.resetCaches('remotes');
 			this.fireChange(RepositoryChange.Remotes);
@@ -390,6 +449,9 @@ export class Repository implements Disposable {
 		}
 
 		this._lastFetched = undefined;
+		if (this._orderByLastFetched) {
+			void this.getLastFetched();
+		}
 
 		const match =
 			uri != null
@@ -472,6 +534,7 @@ export class Repository implements Disposable {
 		const changed = this._closed !== value;
 		this._closed = value;
 		if (changed) {
+			Logger.debug(`Repository(${this.id}).closed(${value})`);
 			this.fireChange(this._closed ? RepositoryChange.Closed : RepositoryChange.Opened);
 		}
 	}
@@ -593,17 +656,20 @@ export class Repository implements Disposable {
 		remote?: string;
 	}) {
 		try {
-			if (options?.branch != null || configuration.get('experimental.nativeGit')) {
-				await this.container.git.fetch(this.uri, options);
-			} else {
-				void (await executeCoreGitCommand('git.fetch', this.path));
-			}
+			await this.container.git.fetch(this.uri, options);
 
 			this.fireChange(RepositoryChange.Unknown);
 		} catch (ex) {
 			Logger.error(ex);
 			void showGenericErrorMessage('Unable to fetch repository');
 		}
+	}
+
+	async getBestRemoteWithIntegration(options?: {
+		filter?: (remote: GitRemote, integration: HostingIntegration) => boolean;
+		includeDisconnected?: boolean;
+	}): Promise<GitRemote<RemoteProvider> | undefined> {
+		return this.container.git.getBestRemoteWithIntegration(this.uri, options);
 	}
 
 	async getBranch(name?: string): Promise<GitBranch | undefined> {
@@ -622,7 +688,7 @@ export class Repository implements Disposable {
 
 	getBranches(options?: {
 		filter?: (b: GitBranch) => boolean;
-		paging?: { cursor?: string; limit?: number };
+		paging?: PagingOptions;
 		sort?: boolean | BranchSortOptions;
 	}) {
 		return this.container.git.getBranches(this.uri, options);
@@ -636,7 +702,38 @@ export class Repository implements Disposable {
 		return this.container.git.getCommit(this.uri, ref);
 	}
 
-	getContributors(options?: { all?: boolean; ref?: string; stats?: boolean }): Promise<GitContributor[]> {
+	@gate()
+	@log({ exit: true })
+	async getCommonRepository(): Promise<Repository | undefined> {
+		const gitDir = await this.getGitDir();
+		if (gitDir?.commonUri == null) return this;
+
+		// If the repository isn't already opened, then open it as a "closed" repo (won't show up in the UI)
+		return this.container.git.getOrOpenRepository(gitDir.commonUri, {
+			detectNested: false,
+			force: true,
+			closeOnOpen: true,
+		});
+	}
+
+	@log({ exit: true })
+	async getCommonRepositoryUri(): Promise<Uri | undefined> {
+		const gitDir = await this.getGitDir();
+		if (gitDir?.commonUri?.path.endsWith('/.git')) {
+			return gitDir.commonUri.with({
+				path: gitDir.commonUri.path.substring(0, gitDir.commonUri.path.length - 5),
+			});
+		}
+
+		return gitDir?.commonUri;
+	}
+
+	getContributors(options?: {
+		all?: boolean;
+		merges?: boolean | 'first-parent';
+		ref?: string;
+		stats?: boolean;
+	}): Promise<GitContributor[]> {
 		return this.container.git.getContributors(this.uri, options);
 	}
 
@@ -652,35 +749,13 @@ export class Repository implements Disposable {
 	private _lastFetched: number | undefined;
 	@gate()
 	async getLastFetched(): Promise<number> {
-		if (this._lastFetched == null) {
-			if (!(await this.hasRemotes())) return 0;
-		}
-
-		try {
-			const lastFetched = await this.container.git.getLastFetchedTimestamp(this.uri);
-			// If we don't get a number, assume the fetch failed, and don't update the timestamp
-			if (lastFetched != null) {
-				this._lastFetched = lastFetched;
-			}
-		} catch {
-			this._lastFetched = undefined;
+		const lastFetched = await this.container.git.getLastFetchedTimestamp(this.uri);
+		// If we don't get a number, assume the fetch failed, and don't update the timestamp
+		if (lastFetched != null) {
+			this._lastFetched = lastFetched;
 		}
 
 		return this._lastFetched ?? 0;
-	}
-
-	@gate()
-	@log({ exit: true })
-	async getMainRepository(): Promise<Repository | undefined> {
-		const gitDir = await this.getGitDir();
-		if (gitDir?.commonUri == null) return this;
-
-		// If the repository isn't already opened, then open it as a "closed" repo (won't show up in the UI)
-		return this.container.git.getOrOpenRepository(gitDir.commonUri, {
-			detectNested: false,
-			force: true,
-			closeOnOpen: true,
-		});
 	}
 
 	getMergeStatus(): Promise<GitMergeStatus | undefined> {
@@ -703,10 +778,6 @@ export class Repository implements Disposable {
 		return options?.filter != null ? remotes.filter(options.filter) : remotes;
 	}
 
-	async getRichRemote(connectedOnly: boolean = false): Promise<GitRemote<RichRemoteProvider> | undefined> {
-		return this.container.git.getBestRemoteWithRichProvider(this.uri, { includeDisconnected: !connectedOnly });
-	}
-
 	getStash(): Promise<GitStash | undefined> {
 		return this.container.git.getStash(this.uri);
 	}
@@ -722,7 +793,7 @@ export class Repository implements Disposable {
 		return tag;
 	}
 
-	getTags(options?: { filter?: (t: GitTag) => boolean; sort?: boolean | TagSortOptions }) {
+	getTags(options?: { filter?: (t: GitTag) => boolean; paging?: PagingOptions; sort?: boolean | TagSortOptions }) {
 		return this.container.git.getTags(this.uri, options);
 	}
 
@@ -753,8 +824,11 @@ export class Repository implements Disposable {
 		return remotes?.length > 0;
 	}
 
-	async hasRichRemote(connectedOnly: boolean = false): Promise<boolean> {
-		const remote = await this.getRichRemote(connectedOnly);
+	async hasRemoteWithIntegration(options?: {
+		filter?: (remote: GitRemote, integration: HostingIntegration) => boolean;
+		includeDisconnected?: boolean;
+	}): Promise<boolean> {
+		const remote = await this.getBestRemoteWithIntegration(options);
 		return remote?.provider != null;
 	}
 
@@ -795,21 +869,12 @@ export class Repository implements Disposable {
 
 	private async pullCore(options?: { rebase?: boolean }) {
 		try {
-			if (configuration.get('experimental.nativeGit')) {
-				const withTags = configuration.getAny<CoreGitConfiguration, boolean>('git.pullTags', this.uri);
-				if (configuration.getAny<CoreGitConfiguration, boolean>('git.fetchOnPull', this.uri)) {
-					await this.container.git.fetch(this.uri);
-				}
-
-				await this.container.git.pull(this.uri, { ...options, tags: withTags });
-			} else {
-				const upstream = await this.hasUpstreamBranch();
-				if (upstream) {
-					void (await executeCoreGitCommand(options?.rebase ? 'git.pullRebase' : 'git.pull', this.path));
-				} else if (configuration.getAny<CoreGitConfiguration, boolean>('git.fetchOnPull', this.uri)) {
-					await this.container.git.fetch(this.uri);
-				}
+			const withTags = configuration.getCore('git.pullTags', this.uri);
+			if (configuration.getCore('git.fetchOnPull', this.uri)) {
+				await this.container.git.fetch(this.uri);
 			}
+
+			await this.container.git.pull(this.uri, { ...options, tags: withTags });
 
 			this.fireChange(RepositoryChange.Unknown);
 		} catch (ex) {
@@ -855,9 +920,7 @@ export class Repository implements Disposable {
 		force?: boolean;
 		progress?: boolean;
 		reference?: GitReference;
-		publish?: {
-			remote: string;
-		};
+		publish?: { remote: string };
 	}) {
 		const { progress, ...opts } = { progress: true, ...options };
 		if (!progress) return this.pushCore(opts);
@@ -873,54 +936,16 @@ export class Repository implements Disposable {
 		);
 	}
 
-	private async pushCore(options?: {
-		force?: boolean;
-		reference?: GitReference;
-		publish?: {
-			remote: string;
-		};
-	}) {
+	private async pushCore(options?: { force?: boolean; reference?: GitReference; publish?: { remote: string } }) {
 		try {
-			if (configuration.get('experimental.nativeGit')) {
-				const branch = await this.getBranch(options?.reference?.name);
-				await this.container.git.push(this.uri, {
-					force: options?.force,
-					branch: isBranchReference(options?.reference) ? options?.reference : branch,
-					...(options?.publish && { publish: options.publish }),
-				});
-			} else if (isBranchReference(options?.reference)) {
-				const repo = await this.container.git.getOrOpenScmRepository(this.uri);
-				if (repo == null) return;
+			await this.container.git.push(this.uri, {
+				reference: options?.reference,
+				force: options?.force,
+				publish: options?.publish,
+			});
 
-				if (options?.publish != null) {
-					await repo?.push(options.publish.remote, options.reference.name, true);
-					void this.showCreatePullRequestPrompt(options.publish.remote, options.reference);
-				} else {
-					const branch = await this.getBranch(options?.reference.name);
-					if (branch == null) return;
-
-					await repo?.push(
-						branch.getRemoteName(),
-						branch.name,
-						undefined,
-						options?.force ? ForcePushMode.ForceWithLease : undefined,
-					);
-				}
-			} else if (options?.reference != null) {
-				const repo = await this.container.git.getOrOpenScmRepository(this.uri);
-				if (repo == null) return;
-
-				const branch = await this.getBranch();
-				if (branch == null) return;
-
-				await repo?.push(
-					branch.getRemoteName(),
-					`${options.reference.ref}:${branch.getNameWithoutRemote()}`,
-					undefined,
-					options?.force ? ForcePushMode.ForceWithLease : undefined,
-				);
-			} else {
-				void (await executeCoreGitCommand(options?.force ? 'git.pushForce' : 'git.push', this.path));
+			if (isBranchReference(options?.reference) && options?.publish != null) {
+				void this.showCreatePullRequestPrompt(options.publish.remote, options.reference);
 			}
 
 			this.fireChange(RepositoryChange.Unknown);
@@ -968,7 +993,7 @@ export class Repository implements Disposable {
 		}
 
 		if (this._pendingFileSystemChange != null) {
-			this._fireFileSystemChangeDebounced!();
+			this._fireFileSystemChangeDebounced?.();
 		}
 	}
 
@@ -1038,8 +1063,16 @@ export class Repository implements Disposable {
 		message?: string,
 		uris?: Uri[],
 		options?: { includeUntracked?: boolean; keepIndex?: boolean; onlyStaged?: boolean },
-	) {
+	): Promise<void> {
 		await this.container.git.stashSave(this.uri, message, uris, options);
+
+		this.fireChange(RepositoryChange.Stash);
+	}
+
+	@gate()
+	@log()
+	async stashSaveSnapshot(message?: string): Promise<void> {
+		await this.container.git.stashSaveSnapshot(this.uri, message);
 
 		this.fireChange(RepositoryChange.Stash);
 	}
@@ -1104,33 +1137,6 @@ export class Repository implements Disposable {
 		return this._etagFileSystem;
 	}
 
-	startWatchingFileSystem(): Disposable {
-		this._fsWatchCounter++;
-		if (this._fsWatcherDisposable == null) {
-			const watcher = workspace.createFileSystemWatcher(new RelativePattern(this.uri, '**'));
-			this._fsWatcherDisposable = Disposable.from(
-				watcher,
-				watcher.onDidChange(this.onFileSystemChanged, this),
-				watcher.onDidCreate(this.onFileSystemChanged, this),
-				watcher.onDidDelete(this.onFileSystemChanged, this),
-			);
-
-			this._etagFileSystem = Date.now();
-		}
-
-		return { dispose: () => this.stopWatchingFileSystem() };
-	}
-
-	stopWatchingFileSystem(force: boolean = false) {
-		if (this._fsWatcherDisposable == null) return;
-		if (--this._fsWatchCounter > 0 && !force) return;
-
-		this._etagFileSystem = undefined;
-		this._fsWatchCounter = 0;
-		this._fsWatcherDisposable.dispose();
-		this._fsWatcherDisposable = undefined;
-	}
-
 	suspend() {
 		this._suspended = true;
 	}
@@ -1150,6 +1156,56 @@ export class Repository implements Disposable {
 		void this.runTerminalCommand('tag', ...args, ...tags.map(t => t.ref));
 	}
 
+	private _fsWatcherDisposable: Disposable | undefined;
+	private _fsWatchers = new Map<string, number>();
+	private _fsChangeDelay: number = defaultFileSystemChangeDelay;
+
+	watchFileSystem(delay: number = defaultFileSystemChangeDelay): Disposable {
+		const id = uuid();
+		this._fsWatchers.set(id, delay);
+		if (this._fsWatcherDisposable == null) {
+			const watcher = workspace.createFileSystemWatcher(new RelativePattern(this.uri, '**'));
+			this._fsWatcherDisposable = Disposable.from(
+				watcher,
+				watcher.onDidChange(this.onFileSystemChanged, this),
+				watcher.onDidCreate(this.onFileSystemChanged, this),
+				watcher.onDidDelete(this.onFileSystemChanged, this),
+			);
+
+			this._etagFileSystem = Date.now();
+		}
+
+		this.ensureMinFileSystemChangeDelay();
+
+		return { dispose: () => this.unWatchFileSystem(id) };
+	}
+
+	private unWatchFileSystem(forceOrId: true | string) {
+		if (typeof forceOrId !== 'boolean') {
+			this._fsWatchers.delete(forceOrId);
+			if (this._fsWatchers.size !== 0) {
+				this.ensureMinFileSystemChangeDelay();
+				return;
+			}
+		}
+
+		this._etagFileSystem = undefined;
+		this._fsChangeDelay = defaultFileSystemChangeDelay;
+		this._fsWatchers.clear();
+		this._fsWatcherDisposable?.dispose();
+		this._fsWatcherDisposable = undefined;
+	}
+
+	private ensureMinFileSystemChangeDelay() {
+		const minDelay = min(this._fsWatchers.values());
+		if (minDelay === this._fsChangeDelay) return;
+
+		this._fsChangeDelay = minDelay;
+		this._fireFileSystemChangeDebounced?.flush();
+		this._fireFileSystemChangeDebounced?.cancel();
+		this._fireFileSystemChangeDebounced = undefined;
+	}
+
 	@debug()
 	private fireChange(...changes: RepositoryChange[]) {
 		const scope = getLogScope();
@@ -1157,7 +1213,7 @@ export class Repository implements Disposable {
 		this._updatedAt = Date.now();
 
 		if (this._fireChangeDebounced == null) {
-			this._fireChangeDebounced = debounce(this.fireChangeCore.bind(this), 250);
+			this._fireChangeDebounced = debounce(this.fireChangeCore.bind(this), defaultRepositoryChangeDelay);
 		}
 
 		this._pendingRepoChange = this._pendingRepoChange?.with(changes) ?? new RepositoryChangeEvent(this, changes);
@@ -1190,7 +1246,10 @@ export class Repository implements Disposable {
 		this._updatedAt = Date.now();
 
 		if (this._fireFileSystemChangeDebounced == null) {
-			this._fireFileSystemChangeDebounced = debounce(this.fireFileSystemChangeCore.bind(this), 2500);
+			this._fireFileSystemChangeDebounced = debounce(
+				this.fireFileSystemChangeCore.bind(this),
+				this._fsChangeDelay,
+			);
 		}
 
 		if (this._pendingFileSystemChange == null) {
@@ -1235,4 +1294,41 @@ export class Repository implements Disposable {
 
 export function isRepository(repository: unknown): repository is Repository {
 	return repository instanceof Repository;
+}
+
+export async function groupRepositories(repositories: Repository[]): Promise<Map<Repository, Map<string, Repository>>> {
+	const repos = new Map<string, Repository>(repositories.map(r => [r.id, r]));
+
+	// Group worktree repos under the common repo when the common repo is also in the list
+	const result = new Map<string, { repo: Repository; worktrees: Map<string, Repository> }>();
+	for (const [, repo] of repos) {
+		const commonUri = await repo.getCommonRepositoryUri();
+		if (commonUri == null) {
+			if (result.has(repo.id)) {
+				debugger;
+			}
+			result.set(repo.id, { repo: repo, worktrees: new Map() });
+			continue;
+		}
+
+		const commonId = asRepoComparisonKey(commonUri);
+		const commonRepo = repos.get(commonId);
+		if (commonRepo == null) {
+			if (result.has(repo.id)) {
+				debugger;
+			}
+			result.set(repo.id, { repo: repo, worktrees: new Map() });
+			continue;
+		}
+
+		let r = result.get(commonRepo.id);
+		if (r == null) {
+			r = { repo: commonRepo, worktrees: new Map() };
+			result.set(commonRepo.id, r);
+		} else {
+			r.worktrees.set(repo.path, repo);
+		}
+	}
+
+	return new Map(map(result, ([, r]) => [r.repo, r.worktrees]));
 }

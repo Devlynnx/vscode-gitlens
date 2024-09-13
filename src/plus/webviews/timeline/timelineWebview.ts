@@ -1,6 +1,6 @@
-import type { TextEditor, ViewColumn } from 'vscode';
-import { commands, Disposable, Uri, window } from 'vscode';
-import { Commands } from '../../../constants';
+import type { TextEditor } from 'vscode';
+import { Disposable, Uri, window } from 'vscode';
+import { Commands, proBadge } from '../../../constants';
 import type { Container } from '../../../container';
 import type { CommitSelectedEvent, FileSelectedEvent } from '../../../eventBus';
 import { PlusFeatures } from '../../../features';
@@ -9,7 +9,7 @@ import { GitUri } from '../../../git/gitUri';
 import { getChangedFilesCount } from '../../../git/models/commit';
 import type { RepositoryChangeEvent } from '../../../git/models/repository';
 import { RepositoryChange, RepositoryChangeComparisonMode } from '../../../git/models/repository';
-import { registerCommand } from '../../../system/command';
+import { executeCommand, registerCommand } from '../../../system/command';
 import { configuration } from '../../../system/configuration';
 import { createFromDateDelta } from '../../../system/date';
 import { debug } from '../../../system/decorators/log';
@@ -17,16 +17,16 @@ import type { Deferrable } from '../../../system/function';
 import { debounce } from '../../../system/function';
 import { filter } from '../../../system/iterable';
 import { hasVisibleTextEditor, isTextEditor } from '../../../system/utils';
-import type { ViewFileNode } from '../../../views/nodes/viewNode';
-import { isViewFileNode } from '../../../views/nodes/viewNode';
+import { isViewFileNode } from '../../../views/nodes/abstract/viewFileNode';
 import type { IpcMessage } from '../../../webviews/protocol';
-import { onIpc } from '../../../webviews/protocol';
-import type { WebviewController, WebviewProvider } from '../../../webviews/webviewController';
 import { updatePendingContext } from '../../../webviews/webviewController';
+import type { WebviewHost, WebviewProvider, WebviewShowingArgs } from '../../../webviews/webviewProvider';
+import type { WebviewShowOptions } from '../../../webviews/webviewsController';
 import { isSerializedState } from '../../../webviews/webviewsController';
-import type { SubscriptionChangeEvent } from '../../subscription/subscriptionService';
+import type { SubscriptionChangeEvent } from '../../gk/account/subscriptionService';
 import type { Commit, Period, State } from './protocol';
-import { DidChangeNotificationType, OpenDataPointCommandType, UpdatePeriodCommandType } from './protocol';
+import { DidChangeNotification, OpenDataPointCommand, UpdatePeriodCommand } from './protocol';
+import type { TimelineWebviewShowingArgs } from './registration';
 
 interface Context {
 	uri: Uri | undefined;
@@ -38,7 +38,7 @@ interface Context {
 
 const defaultPeriod: Period = '3|M';
 
-export class TimelineWebviewProvider implements WebviewProvider<State> {
+export class TimelineWebviewProvider implements WebviewProvider<State, State, TimelineWebviewShowingArgs> {
 	private _bootstraping = true;
 	/** The context the webview has */
 	private _context: Context;
@@ -48,7 +48,7 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 
 	constructor(
 		private readonly container: Container,
-		private readonly host: WebviewController<State>,
+		private readonly host: WebviewHost,
 	) {
 		this._context = {
 			uri: undefined,
@@ -61,13 +61,13 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		this._context = { ...this._context, ...this._pendingContext };
 		this._pendingContext = undefined;
 
-		if (this.host.isEditor()) {
+		if (this.host.isHost('editor')) {
 			this._disposable = Disposable.from(
 				this.container.subscription.onDidChange(this.onSubscriptionChanged, this),
 				this.container.git.onDidChangeRepository(this.onRepositoryChanged, this),
 			);
 		} else {
-			this.host.description = '✨';
+			this.host.description = proBadge;
 			this._disposable = Disposable.from(
 				this.container.subscription.onDidChange(this.onSubscriptionChanged, this),
 				this.container.git.onDidChangeRepository(this.onRepositoryChanged, this),
@@ -86,10 +86,33 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		void this.notifyDidChangeState(true);
 	}
 
+	canReuseInstance(...args: WebviewShowingArgs<TimelineWebviewShowingArgs, State>): boolean | undefined {
+		let uri: Uri | undefined;
+
+		const [arg] = args;
+		if (arg != null) {
+			if (arg instanceof Uri) {
+				uri = arg;
+			} else if (isViewFileNode(arg)) {
+				uri = arg.uri;
+			} else if (isSerializedState<State>(arg) && arg.state.uri != null) {
+				uri = Uri.parse(arg.state.uri);
+			}
+		} else {
+			uri = window.activeTextEditor?.document.uri;
+		}
+
+		return uri?.toString() === this._context.uri?.toString() ? true : undefined;
+	}
+
+	getSplitArgs(): WebviewShowingArgs<TimelineWebviewShowingArgs, State> {
+		return this._context.uri != null ? [this._context.uri] : [];
+	}
+
 	onShowing(
 		loading: boolean,
-		_options: { column?: ViewColumn; preserveFocus?: boolean },
-		...args: [Uri | ViewFileNode | { state: Partial<State> }] | unknown[]
+		_options?: WebviewShowOptions,
+		...args: WebviewShowingArgs<TimelineWebviewShowingArgs, State>
 	): boolean {
 		const [arg] = args;
 		if (arg != null) {
@@ -127,20 +150,30 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 	}
 
 	registerCommands(): Disposable[] {
-		if (this.host.isEditor()) {
-			return [registerCommand(Commands.RefreshTimelinePage, () => this.host.refresh(true))];
+		const commands: Disposable[] = [];
+
+		if (this.host.isHost('view')) {
+			commands.push(
+				registerCommand(`${this.host.id}.refresh`, () => this.host.refresh(true), this),
+				registerCommand(
+					`${this.host.id}.openInTab`,
+					() => {
+						if (this._context.uri == null) return;
+
+						void executeCommand(Commands.ShowInTimeline, this._context.uri);
+					},
+					this,
+				),
+			);
 		}
 
-		return [
-			registerCommand(`${this.host.id}.refresh`, () => this.host.refresh(true), this),
-			registerCommand(`${this.host.id}.openInTab`, () => this.openInTab(), this),
-		];
+		return commands;
 	}
 
 	onVisibilityChanged(visible: boolean) {
 		if (!visible) return;
 
-		if (this.host.isView()) {
+		if (this.host.isHost('view')) {
 			this.updatePendingEditor(window.activeTextEditor);
 		}
 
@@ -158,47 +191,42 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		this.updateState();
 	}
 
-	onMessageReceived(e: IpcMessage) {
-		switch (e.method) {
-			case OpenDataPointCommandType.method:
-				onIpc(OpenDataPointCommandType, e, async params => {
-					if (params.data == null || !params.data.selected || this._context.uri == null) return;
+	async onMessageReceived(e: IpcMessage) {
+		switch (true) {
+			case OpenDataPointCommand.is(e): {
+				if (e.params.data == null || !e.params.data.selected || this._context.uri == null) return;
 
-					const repository = this.container.git.getRepository(this._context.uri);
-					if (repository == null) return;
+				const repository = this.container.git.getRepository(this._context.uri);
+				if (repository == null) return;
 
-					const commit = await repository.getCommit(params.data.id);
-					if (commit == null) return;
+				const commit = await repository.getCommit(e.params.data.id);
+				if (commit == null) return;
 
-					this.container.events.fire(
-						'commit:selected',
-						{
-							commit: commit,
-							interaction: 'active',
-							preserveFocus: true,
-							preserveVisibility: false,
-						},
-						{ source: this.host.id },
-					);
+				this.container.events.fire(
+					'commit:selected',
+					{
+						commit: commit,
+						interaction: 'active',
+						preserveFocus: true,
+						preserveVisibility: false,
+					},
+					{ source: this.host.id },
+				);
 
-					if (!this.container.commitDetailsView.ready) {
-						void this.container.commitDetailsView.show({ preserveFocus: true }, {
-							commit: commit,
-							interaction: 'active',
-							preserveVisibility: false,
-						} satisfies CommitSelectedEvent['data']);
-					}
-				});
+				if (!this.container.commitDetailsView.ready) {
+					void this.container.commitDetailsView.show({ preserveFocus: true }, {
+						commit: commit,
+						interaction: 'active',
+						preserveVisibility: false,
+					} satisfies CommitSelectedEvent['data']);
+				}
 
 				break;
-
-			case UpdatePeriodCommandType.method:
-				onIpc(UpdatePeriodCommandType, e, params => {
-					if (this.updatePendingContext({ period: params.period })) {
-						this.updateState(true);
-					}
-				});
-
+			}
+			case UpdatePeriodCommand.is(e):
+				if (this.updatePendingContext({ period: e.params.period })) {
+					this.updateState(true);
+				}
 				break;
 		}
 	}
@@ -223,10 +251,8 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		if (e.data == null) return;
 
 		let uri: Uri | undefined = e.data.uri;
-		if (uri != null) {
-			if (!this.container.git.isTrackable(uri)) {
-				uri = undefined;
-			}
+		if (uri != null && !this.container.git.isTrackable(uri)) {
+			uri = undefined;
 		}
 
 		if (!this.updatePendingUri(uri)) return;
@@ -270,11 +296,11 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		const gitUri = current.uri != null ? await GitUri.fromUri(current.uri) : undefined;
 		const repoPath = gitUri?.repoPath;
 
-		if (this.host.isEditor()) {
+		if (this.host.isHost('editor')) {
 			this.host.title =
 				gitUri == null ? this.host.originalTitle : `${this.host.originalTitle}: ${gitUri.fileName}`;
 		} else {
-			this.host.description = gitUri?.fileName ?? '✨';
+			this.host.description = gitUri?.fileName ?? proBadge;
 		}
 
 		const access = await this.container.git.access(PlusFeatures.Timeline, repoPath);
@@ -282,8 +308,7 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		if (current.uri == null || gitUri == null || repoPath == null || access.allowed === false) {
 			const access = await this.container.git.access(PlusFeatures.Timeline, repoPath);
 			return {
-				webviewId: this.host.id,
-				timestamp: Date.now(),
+				...this.host.baseWebviewState,
 				period: period,
 				title: gitUri?.relativePath,
 				sha: gitUri?.shortSha,
@@ -305,8 +330,7 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 
 		if (log == null) {
 			return {
-				webviewId: this.host.id,
-				timestamp: Date.now(),
+				...this.host.baseWebviewState,
 				dataset: [],
 				period: period,
 				title: gitUri.relativePath,
@@ -364,8 +388,7 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 		dataset.sort((a, b) => b.sort - a.sort);
 
 		return {
-			webviewId: this.host.id,
-			timestamp: Date.now(),
+			...this.host.baseWebviewState,
 			dataset: dataset,
 			period: period,
 			title: gitUri.relativePath,
@@ -435,20 +458,9 @@ export class TimelineWebviewProvider implements WebviewProvider<State> {
 			context = this._context;
 		}
 
-		const task = async () =>
-			this.host.notify(DidChangeNotificationType, {
-				state: await this.getState(context),
-			});
-
-		if (!this.host.isView()) return task();
-		return window.withProgress({ location: { viewId: this.host.id } }, task);
-	}
-
-	private openInTab() {
-		const uri = this._context.uri;
-		if (uri == null) return;
-
-		void commands.executeCommand(Commands.ShowTimelinePage, uri);
+		return this.host.notify(DidChangeNotification, {
+			state: await this.getState(context),
+		});
 	}
 }
 

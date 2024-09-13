@@ -1,21 +1,21 @@
 import { Disposable, window } from 'vscode';
 import { getAvatarUriFromGravatarEmail } from '../../../avatars';
 import type { Container } from '../../../container';
-import type { Subscription } from '../../../subscription';
 import { registerCommand } from '../../../system/command';
 import type { Deferrable } from '../../../system/function';
 import { debounce } from '../../../system/function';
-import type { WebviewController, WebviewProvider } from '../../../webviews/webviewController';
-import type { SubscriptionChangeEvent } from '../../subscription/subscriptionService';
+import type { WebviewHost, WebviewProvider } from '../../../webviews/webviewProvider';
+import type { Subscription } from '../../gk/account/subscription';
+import type { SubscriptionChangeEvent } from '../../gk/account/subscriptionService';
 import type { State } from './protocol';
-import { DidChangeSubscriptionNotificationType } from './protocol';
+import { DidChangeSubscriptionNotification } from './protocol';
 
 export class AccountWebviewProvider implements WebviewProvider<State> {
 	private readonly _disposable: Disposable;
 
 	constructor(
 		private readonly container: Container,
-		private readonly host: WebviewController<State>,
+		private readonly host: WebviewHost,
 	) {
 		this._disposable = Disposable.from(this.container.subscription.onDidChange(this.onSubscriptionChanged, this));
 	}
@@ -80,6 +80,7 @@ export class AccountWebviewProvider implements WebviewProvider<State> {
 		return {
 			subscription: sub,
 			avatar: avatar,
+			organizationsCount: ((await this.container.organizations.getOrganizations()) ?? []).length,
 		};
 	}
 
@@ -87,18 +88,18 @@ export class AccountWebviewProvider implements WebviewProvider<State> {
 		const subscriptionResult = await this.getSubscription(subscription);
 
 		return {
-			webviewId: this.host.id,
-			timestamp: Date.now(),
+			...this.host.baseWebviewState,
 			webroot: this.host.getWebRoot(),
 			subscription: subscriptionResult.subscription,
 			avatar: subscriptionResult.avatar,
+			organizationsCount: subscriptionResult.organizationsCount,
 		};
 	}
 
 	private notifyDidChangeSubscription(subscription?: Subscription) {
 		return window.withProgress({ location: { viewId: this.host.id } }, async () => {
 			const sub = await this.getSubscription(subscription);
-			return this.host.notify(DidChangeSubscriptionNotificationType, {
+			return this.host.notify(DidChangeSubscriptionNotification, {
 				...sub,
 			});
 		});

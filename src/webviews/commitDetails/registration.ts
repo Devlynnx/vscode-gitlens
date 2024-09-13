@@ -1,13 +1,16 @@
+import type { CommitSelectedEvent } from '../../eventBus';
 import type { Serialized } from '../../system/serialize';
 import type { WebviewsController } from '../webviewsController';
-import type { State } from './protocol';
+import type { ShowWipArgs, State } from './protocol';
+
+export type CommitDetailsWebviewShowingArgs = [Partial<CommitSelectedEvent['data']> | ShowWipArgs];
 
 export function registerCommitDetailsWebviewView(controller: WebviewsController) {
-	return controller.registerWebviewView<State, Serialized<State>>(
+	return controller.registerWebviewView<State, Serialized<State>, CommitDetailsWebviewShowingArgs>(
 		{
 			id: 'gitlens.views.commitDetails',
 			fileName: 'commitDetails.html',
-			title: 'Commit Details',
+			title: 'Inspect',
 			contextKeyPrefix: `gitlens:webviewView:commitDetails`,
 			trackingFeature: 'commitDetailsView',
 			plusFeature: false,
@@ -17,19 +20,19 @@ export function registerCommitDetailsWebviewView(controller: WebviewsController)
 		},
 		async (container, host) => {
 			const { CommitDetailsWebviewProvider } = await import(
-				/* webpackChunkName: "commitDetails" */ './commitDetailsWebview'
+				/* webpackChunkName: "webview-commitDetails" */ './commitDetailsWebview'
 			);
-			return new CommitDetailsWebviewProvider(container, host, { mode: 'default' });
+			return new CommitDetailsWebviewProvider(container, host, { attachedTo: 'default' });
 		},
 	);
 }
 
 export function registerGraphDetailsWebviewView(controller: WebviewsController) {
-	return controller.registerWebviewView<State, Serialized<State>>(
+	return controller.registerWebviewView<State, Serialized<State>, CommitDetailsWebviewShowingArgs>(
 		{
 			id: 'gitlens.views.graphDetails',
 			fileName: 'commitDetails.html',
-			title: 'Commit Graph Details',
+			title: 'Commit Graph Inspect',
 			contextKeyPrefix: `gitlens:webviewView:graphDetails`,
 			trackingFeature: 'graphDetailsView',
 			plusFeature: false,
@@ -39,9 +42,9 @@ export function registerGraphDetailsWebviewView(controller: WebviewsController) 
 		},
 		async (container, host) => {
 			const { CommitDetailsWebviewProvider } = await import(
-				/* webpackChunkName: "commitDetails" */ './commitDetailsWebview'
+				/* webpackChunkName: "webview-commitDetails" */ './commitDetailsWebview'
 			);
-			return new CommitDetailsWebviewProvider(container, host, { mode: 'graph' });
+			return new CommitDetailsWebviewProvider(container, host, { attachedTo: 'graph' });
 		},
 	);
 }

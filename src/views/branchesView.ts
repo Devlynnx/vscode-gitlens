@@ -8,16 +8,17 @@ import type { GitCommit } from '../git/models/commit';
 import { isCommit } from '../git/models/commit';
 import type { GitBranchReference, GitRevisionReference } from '../git/models/reference';
 import { getReferenceLabel } from '../git/models/reference';
-import type { RepositoryChangeEvent } from '../git/models/repository';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
+import type { Repository, RepositoryChangeEvent } from '../git/models/repository';
+import { groupRepositories, RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository';
 import { executeCommand } from '../system/command';
 import { configuration } from '../system/configuration';
 import { gate } from '../system/decorators/gate';
+import { RepositoriesSubscribeableNode } from './nodes/abstract/repositoriesSubscribeableNode';
+import { RepositoryFolderNode } from './nodes/abstract/repositoryFolderNode';
+import type { ViewNode } from './nodes/abstract/viewNode';
 import { BranchesNode } from './nodes/branchesNode';
 import { BranchNode } from './nodes/branchNode';
 import { BranchOrTagFolderNode } from './nodes/branchOrTagFolderNode';
-import type { ViewNode } from './nodes/viewNode';
-import { RepositoriesSubscribeableNode, RepositoryFolderNode } from './nodes/viewNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
 
@@ -47,14 +48,45 @@ export class BranchesRepositoryNode extends RepositoryFolderNode<BranchesView, B
 export class BranchesViewNode extends RepositoriesSubscribeableNode<BranchesView, BranchesRepositoryNode> {
 	async getChildren(): Promise<ViewNode[]> {
 		if (this.children == null) {
-			const repositories = this.view.container.git.openRepositories;
+			let grouped: Map<Repository, Map<string, Repository>> | undefined;
+
+			let repositories = this.view.container.git.openRepositories;
+			if (configuration.get('views.collapseWorktreesWhenPossible')) {
+				grouped = await groupRepositories(repositories);
+				repositories = [...grouped.keys()];
+			}
+
 			if (repositories.length === 0) {
-				this.view.message = 'No branches could be found.';
+				this.view.message = this.view.container.git.isDiscoveringRepositories
+					? 'Loading branches...'
+					: 'No branches could be found.';
 
 				return [];
 			}
 
 			this.view.message = undefined;
+
+			let openWorktreeBranches: Set<string> | undefined;
+			if (grouped?.size) {
+				// Get all the opened worktree branches to pass along downstream, e.g. in the BranchNode to display an indicator
+				openWorktreeBranches = new Set<string>();
+
+				await Promise.allSettled(
+					[...grouped].map(async ([r, nested]) => {
+						if (!nested.size) return;
+
+						const worktrees = await r.getWorktrees();
+						for (const wt of worktrees) {
+							if (wt.branch == null || nested.has(wt.repoPath)) return;
+
+							openWorktreeBranches!.add(wt.branch?.name);
+						}
+					}),
+				);
+			}
+			this.updateContext({
+				openWorktreeBranches: openWorktreeBranches?.size ? openWorktreeBranches : undefined,
+			});
 
 			const splat = repositories.length === 1;
 			this.children = repositories.map(
@@ -101,6 +133,10 @@ export class BranchesView extends ViewBase<'branches', BranchesViewNode, Branche
 
 	override get canReveal(): boolean {
 		return this.config.reveal || !configuration.get('views.repositories.showBranches');
+	}
+
+	override get canSelectMany(): boolean {
+		return this.container.prereleaseOrDebugging;
 	}
 
 	protected getRoot() {
@@ -177,7 +213,9 @@ export class BranchesView extends ViewBase<'branches', BranchesViewNode, Branche
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
 			!configuration.changed(e, 'defaultTimeFormat') &&
-			!configuration.changed(e, 'sortBranchesBy')
+			!configuration.changed(e, 'sortBranchesBy') &&
+			!configuration.changed(e, 'sortRepositoriesBy') &&
+			!configuration.changed(e, 'views.collapseWorktreesWhenPossible')
 		) {
 			return false;
 		}
@@ -213,6 +251,7 @@ export class BranchesView extends ViewBase<'branches', BranchesViewNode, Branche
 		const branches = await this.container.git.getCommitBranches(
 			commit.repoPath,
 			commit.ref,
+			undefined,
 			isCommit(commit) ? { commitDate: commit.committer.date } : undefined,
 		);
 		if (branches.length === 0) return undefined;

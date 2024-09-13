@@ -1,21 +1,31 @@
 import { Disposable, ViewColumn } from 'vscode';
+import { isScm } from '../../../commands/base';
 import { Commands } from '../../../constants';
 import type { Container } from '../../../container';
+import type { GitReference } from '../../../git/models/reference';
 import type { Repository } from '../../../git/models/repository';
 import { executeCommand, executeCoreCommand, registerCommand } from '../../../system/command';
 import { configuration } from '../../../system/configuration';
 import { getContext } from '../../../system/context';
+import { ViewNode } from '../../../views/nodes/abstract/viewNode';
 import type { BranchNode } from '../../../views/nodes/branchNode';
 import type { CommitFileNode } from '../../../views/nodes/commitFileNode';
 import type { CommitNode } from '../../../views/nodes/commitNode';
+import { PullRequestNode } from '../../../views/nodes/pullRequestNode';
 import type { StashNode } from '../../../views/nodes/stashNode';
 import type { TagNode } from '../../../views/nodes/tagNode';
-import type { WebviewPanelProxy, WebviewsController } from '../../../webviews/webviewsController';
+import type {
+	WebviewPanelShowCommandArgs,
+	WebviewPanelsProxy,
+	WebviewsController,
+} from '../../../webviews/webviewsController';
 import type { ShowInCommitGraphCommandArgs, State } from './protocol';
 
+export type GraphWebviewShowingArgs = [Repository | { ref: GitReference }];
+
 export function registerGraphWebviewPanel(controller: WebviewsController) {
-	return controller.registerWebviewPanel<State>(
-		Commands.ShowGraphPage,
+	return controller.registerWebviewPanel<State, State, GraphWebviewShowingArgs>(
+		{ id: Commands.ShowGraphPage, options: { preserveInstance: true } },
 		{
 			id: 'gitlens.graph',
 			fileName: 'graph.html',
@@ -29,16 +39,17 @@ export function registerGraphWebviewPanel(controller: WebviewsController) {
 				retainContextWhenHidden: true,
 				enableFindWidget: false,
 			},
+			allowMultipleInstances: configuration.get('graph.allowMultiple'),
 		},
 		async (container, host) => {
-			const { GraphWebviewProvider } = await import(/* webpackChunkName: "graph" */ './graphWebview');
+			const { GraphWebviewProvider } = await import(/* webpackChunkName: "webview-graph" */ './graphWebview');
 			return new GraphWebviewProvider(container, host);
 		},
 	);
 }
 
 export function registerGraphWebviewView(controller: WebviewsController) {
-	return controller.registerWebviewView<State>(
+	return controller.registerWebviewView<State, State, GraphWebviewShowingArgs>(
 		{
 			id: 'gitlens.views.graph',
 			fileName: 'graph.html',
@@ -51,24 +62,51 @@ export function registerGraphWebviewView(controller: WebviewsController) {
 			},
 		},
 		async (container, host) => {
-			const { GraphWebviewProvider } = await import(/* webpackChunkName: "graph" */ './graphWebview');
+			const { GraphWebviewProvider } = await import(/* webpackChunkName: "webview-graph" */ './graphWebview');
 			return new GraphWebviewProvider(container, host);
 		},
 	);
 }
 
-export function registerGraphWebviewCommands(container: Container, webview: WebviewPanelProxy) {
+export function registerGraphWebviewCommands<T>(
+	container: Container,
+	panels: WebviewPanelsProxy<GraphWebviewShowingArgs, T>,
+) {
 	return Disposable.from(
-		registerCommand(Commands.ShowGraph, (...args: any[]) =>
-			configuration.get('graph.layout') === 'panel'
-				? executeCommand(Commands.ShowGraphView, ...args)
-				: executeCommand(Commands.ShowGraphPage, ...args),
-		),
-		registerCommand('gitlens.graph.switchToEditorLayout', async () => {
-			await configuration.updateEffective('graph.layout', 'editor');
-			queueMicrotask(() => void executeCommand(Commands.ShowGraphPage));
+		registerCommand(Commands.ShowGraph, (...args: unknown[]) => {
+			const [arg] = args;
+
+			let showInGraphArg;
+			if (isScm(arg)) {
+				if (arg.rootUri != null) {
+					const repo = container.git.getRepository(arg.rootUri);
+					if (repo != null) {
+						showInGraphArg = repo;
+					}
+				}
+				args = [];
+			} else if (arg instanceof ViewNode) {
+				if (arg.is('repo-folder')) {
+					showInGraphArg = arg.repo;
+				}
+				args = [];
+			}
+
+			if (showInGraphArg != null) {
+				return executeCommand(Commands.ShowInCommitGraph, showInGraphArg);
+			}
+
+			if (configuration.get('graph.layout') === 'panel') {
+				return executeCommand(Commands.ShowGraphView, ...args);
+			}
+
+			return executeCommand<WebviewPanelShowCommandArgs>(Commands.ShowGraphPage, undefined, ...args);
 		}),
-		registerCommand('gitlens.graph.switchToPanelLayout', async () => {
+		registerCommand(`${panels.id}.switchToEditorLayout`, async () => {
+			await configuration.updateEffective('graph.layout', 'editor');
+			queueMicrotask(() => void executeCommand<WebviewPanelShowCommandArgs>(Commands.ShowGraphPage));
+		}),
+		registerCommand(`${panels.id}.switchToPanelLayout`, async () => {
 			await configuration.updateEffective('graph.layout', 'panel');
 			queueMicrotask(async () => {
 				await executeCoreCommand('gitlens.views.graph.resetViewLocation');
@@ -100,14 +138,29 @@ export function registerGraphWebviewCommands(container: Container, webview: Webv
 					| BranchNode
 					| CommitNode
 					| CommitFileNode
+					| PullRequestNode
 					| StashNode
 					| TagNode,
 			) => {
+				if (args instanceof PullRequestNode) {
+					if (args.ref == null) return;
+
+					args = { ref: args.ref };
+				}
+
 				const preserveFocus = 'preserveFocus' in args ? args.preserveFocus ?? false : false;
 				if (configuration.get('graph.layout') === 'panel') {
+					if (!container.graphView.visible) {
+						const instance = panels.getBestInstance({ preserveFocus: preserveFocus }, args);
+						if (instance != null) {
+							void instance.show({ preserveFocus: preserveFocus }, args);
+							return;
+						}
+					}
+
 					void container.graphView.show({ preserveFocus: preserveFocus }, args);
 				} else {
-					void webview.show({ preserveFocus: preserveFocus }, args);
+					void panels.show({ preserveFocus: preserveFocus }, args);
 				}
 			},
 		),
@@ -120,12 +173,24 @@ export function registerGraphWebviewCommands(container: Container, webview: Webv
 					| BranchNode
 					| CommitNode
 					| CommitFileNode
+					| PullRequestNode
 					| StashNode
 					| TagNode,
 			) => {
+				if (args instanceof PullRequestNode) {
+					if (args.ref == null) return;
+
+					args = { ref: args.ref };
+				}
+
 				const preserveFocus = 'preserveFocus' in args ? args.preserveFocus ?? false : false;
 				void container.graphView.show({ preserveFocus: preserveFocus }, args);
 			},
+		),
+		registerCommand(`${panels.id}.refresh`, () => void panels.getActiveInstance()?.refresh(true)),
+		registerCommand(
+			`${panels.id}.split`,
+			() => void panels.splitActiveInstance({ preserveInstance: false, column: ViewColumn.Beside }),
 		),
 	);
 }

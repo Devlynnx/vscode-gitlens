@@ -57,8 +57,18 @@ export class SelectableQuickInputButton extends ToggleQuickInputButton {
 	}
 }
 
+export const ClearQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('clear-all'),
+	tooltip: 'Clear',
+};
+
+export const FeedbackQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('feedback'),
+	tooltip: 'Give Us Feedback',
+};
+
 export const FetchQuickInputButton: QuickInputButton = {
-	iconPath: new ThemeIcon('sync'),
+	iconPath: new ThemeIcon('gitlens-repo-fetch'),
 	tooltip: 'Fetch',
 };
 
@@ -107,6 +117,55 @@ export const PickCommitToggleQuickInputButton = class extends ToggleQuickInputBu
 	}
 };
 
+export const MergeQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('merge'),
+	tooltip: 'Merge...',
+};
+
+export const OpenOnGitHubQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('globe'),
+	tooltip: 'Open on GitHub',
+};
+
+export const OpenOnWebQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('globe'),
+	tooltip: 'Open on gitkraken.dev',
+};
+
+export const OpenInEditorQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('link-external'),
+	tooltip: 'Open in Editor',
+};
+
+export const LaunchpadSettingsQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('gear'),
+	tooltip: 'Launchpad Settings',
+};
+
+export const PinQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('pinned'),
+	tooltip: 'Pin',
+};
+
+export const UnpinQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('pin'),
+	tooltip: 'Unpin',
+};
+
+export const SnoozeQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('bell-slash'),
+	tooltip: 'Snooze',
+};
+
+export const RefreshQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('refresh'),
+	tooltip: 'Refresh',
+};
+
+export const UnsnoozeQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('bell'),
+	tooltip: 'Unsnooze',
+};
 export const OpenInNewWindowQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('empty-window'),
 	tooltip: 'Open in New Window',
@@ -124,7 +183,7 @@ export const SetRemoteAsDefaultQuickInputButton: QuickInputButton = {
 
 export const ShowDetailsViewQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('eye'),
-	tooltip: 'Open Details',
+	tooltip: 'Inspect Details',
 };
 
 export const OpenChangesViewQuickInputButton: QuickInputButton = {
@@ -137,6 +196,11 @@ export const ShowResultsInSideBarQuickInputButton: QuickInputButton = {
 	tooltip: 'Show Results in Side Bar',
 };
 
+export const OpenWorktreeInNewWindowQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('empty-window'),
+	tooltip: 'Open Worktree in New Window',
+};
+
 export const ShowTagsToggleQuickInputButton = class extends SelectableQuickInputButton {
 	constructor(on = false) {
 		super('Show Tags', { off: new ThemeIcon('tag'), on: 'icon-tag-selected' }, on);
@@ -144,27 +208,25 @@ export const ShowTagsToggleQuickInputButton = class extends SelectableQuickInput
 };
 
 export const WillConfirmForcedQuickInputButton: QuickInputButton = {
-	iconPath: new ThemeIcon('check'),
-	tooltip: 'Will always confirm',
+	iconPath: new ThemeIcon('gitlens-confirm-checked'),
+	tooltip: 'You will be presented with a required confirmation step before the action is performed',
 };
 
 export const WillConfirmToggleQuickInputButton = class extends ToggleQuickInputButton {
-	constructor(on = false, onDidClick?: (quickInput: QuickInput) => void) {
+	constructor(on = false, isConfirmationStep: boolean, onDidClick?: (quickInput: QuickInput) => void) {
 		super(
 			() => ({
 				on: {
-					tooltip: 'Will confirm',
-					icon: {
-						dark: Uri.file(Container.instance.context.asAbsolutePath('images/dark/icon-check.svg')),
-						light: Uri.file(Container.instance.context.asAbsolutePath('images/light/icon-check.svg')),
-					},
+					tooltip: isConfirmationStep
+						? 'For future actions, you will be presented with confirmation step before the action is performed\nClick to toggle'
+						: 'You will be presented with confirmation step before the action is performed\nClick to toggle',
+					icon: new ThemeIcon('gitlens-confirm-checked'),
 				},
 				off: {
-					tooltip: 'Skips confirm',
-					icon: {
-						dark: Uri.file(Container.instance.context.asAbsolutePath('images/dark/icon-no-check.svg')),
-						light: Uri.file(Container.instance.context.asAbsolutePath('images/light/icon-no-check.svg')),
-					},
+					tooltip: isConfirmationStep
+						? "For future actions, you won't be presented with confirmation step before the action is performed\nClick to toggle"
+						: "You won't be presented with confirmation step before the action is performed\nClick to toggle",
+					icon: new ThemeIcon('gitlens-confirm-unchecked'),
 				},
 			}),
 			on,

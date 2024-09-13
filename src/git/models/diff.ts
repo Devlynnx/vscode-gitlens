@@ -1,49 +1,28 @@
-import { parseDiffHunk } from '../parsers/diffParser';
+import type { GitFileChange } from './file';
 
-export interface GitDiffLine {
-	line: string;
-	state: 'added' | 'removed' | 'unchanged';
+export interface GitDiff {
+	readonly contents: string;
+	readonly from: string;
+	readonly to: string;
 }
 
 export interface GitDiffHunkLine {
-	hunk: GitDiffHunk;
-	current: GitDiffLine | undefined;
-	previous: GitDiffLine | undefined;
+	current: string | undefined;
+	previous: string | undefined;
+	state: 'added' | 'changed' | 'removed' | 'unchanged';
 }
 
-export class GitDiffHunk {
-	constructor(
-		public readonly contents: string,
-		public current: {
-			count: number;
-			position: { start: number; end: number };
-		},
-		public previous: {
-			count: number;
-			position: { start: number; end: number };
-		},
-	) {}
-
-	get lines(): GitDiffHunkLine[] {
-		return this.parseHunk().lines;
-	}
-
-	get state(): 'added' | 'changed' | 'removed' {
-		return this.parseHunk().state;
-	}
-
-	private parsedHunk: { lines: GitDiffHunkLine[]; state: 'added' | 'changed' | 'removed' } | undefined;
-	private parseHunk() {
-		if (this.parsedHunk == null) {
-			this.parsedHunk = parseDiffHunk(this);
-		}
-		return this.parsedHunk;
-	}
-}
-
-export interface GitDiff {
-	readonly baseSha: string;
+export interface GitDiffHunk {
 	readonly contents: string;
+	readonly current: {
+		readonly count: number;
+		readonly position: { readonly start: number; readonly end: number };
+	};
+	readonly previous: {
+		readonly count: number;
+		readonly position: { readonly start: number; readonly end: number };
+	};
+	readonly lines: Map<number, GitDiffHunkLine>;
 }
 
 export interface GitDiffFile {
@@ -51,10 +30,19 @@ export interface GitDiffFile {
 	readonly contents?: string;
 }
 
+export interface GitDiffLine {
+	readonly hunk: GitDiffHunk;
+	readonly line: GitDiffHunkLine;
+}
+
 export interface GitDiffShortStat {
 	readonly additions: number;
 	readonly deletions: number;
 	readonly changedFiles: number;
+}
+
+export interface GitDiffFiles {
+	readonly files: GitFileChange[];
 }
 
 export type GitDiffFilter = 'A' | 'C' | 'D' | 'M' | 'R' | 'T' | 'U' | 'X' | 'B' | '*';

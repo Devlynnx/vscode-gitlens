@@ -1,46 +1,56 @@
 import { ColorThemeKind, ThemeColor, ThemeIcon, window } from 'vscode';
 import type { Colors } from '../../constants';
-import type { RemoteProviderReference } from './remoteProvider';
+import type { ProviderReference } from './remoteProvider';
 
 export type IssueOrPullRequestType = 'issue' | 'pullrequest';
 export type IssueOrPullRequestState = 'opened' | 'closed' | 'merged';
+export enum RepositoryAccessLevel {
+	Admin = 100,
+	Maintain = 40,
+	Write = 30,
+	Triage = 20,
+	Read = 10,
+	None = 0,
+}
 
 export interface IssueOrPullRequest {
 	readonly type: IssueOrPullRequestType;
-	readonly provider: RemoteProviderReference;
+	readonly provider: ProviderReference;
 	readonly id: string;
+	readonly nodeId: string | undefined;
 	readonly title: string;
 	readonly url: string;
-	readonly date: Date;
+	readonly createdDate: Date;
+	readonly updatedDate: Date;
 	readonly closedDate?: Date;
 	readonly closed: boolean;
 	readonly state: IssueOrPullRequestState;
+	readonly commentsCount?: number;
+	readonly thumbsUpCount?: number;
 }
 
 export interface IssueLabel {
-	color: string;
+	color?: string;
 	name: string;
 }
 
 export interface IssueMember {
 	name: string;
-	avatarUrl: string;
-	url: string;
+	avatarUrl?: string;
+	url?: string;
 }
 
 export interface IssueRepository {
 	owner: string;
 	repo: string;
+	accessLevel?: RepositoryAccessLevel;
 }
 
 export interface IssueShape extends IssueOrPullRequest {
-	updatedDate: Date;
 	author: IssueMember;
 	assignees: IssueMember[];
-	repository: IssueRepository;
+	repository?: IssueRepository;
 	labels?: IssueLabel[];
-	commentsCount?: number;
-	thumbsUpCount?: number;
 }
 
 export interface SearchedIssue {
@@ -58,9 +68,11 @@ export function serializeIssueOrPullRequest(value: IssueOrPullRequest): IssueOrP
 			icon: value.provider.icon,
 		},
 		id: value.id,
+		nodeId: value.nodeId,
 		title: value.title,
 		url: value.url,
-		date: value.date,
+		createdDate: value.createdDate,
+		updatedDate: value.updatedDate,
 		closedDate: value.closedDate,
 		closed: value.closed,
 		state: value.state,
@@ -183,22 +195,26 @@ export function serializeIssue(value: IssueShape): IssueShape {
 			icon: value.provider.icon,
 		},
 		id: value.id,
+		nodeId: value.nodeId,
 		title: value.title,
 		url: value.url,
-		date: value.date,
+		createdDate: value.createdDate,
+		updatedDate: value.updatedDate,
 		closedDate: value.closedDate,
 		closed: value.closed,
 		state: value.state,
-		updatedDate: value.updatedDate,
 		author: {
 			name: value.author.name,
 			avatarUrl: value.author.avatarUrl,
 			url: value.author.url,
 		},
-		repository: {
-			owner: value.repository.owner,
-			repo: value.repository.repo,
-		},
+		repository:
+			value.repository == null
+				? undefined
+				: {
+						owner: value.repository.owner,
+						repo: value.repository.repo,
+				  },
 		assignees: value.assignees.map(assignee => ({
 			name: assignee.name,
 			avatarUrl: assignee.avatarUrl,
@@ -221,14 +237,15 @@ export class Issue implements IssueShape {
 	readonly type = 'issue';
 
 	constructor(
-		public readonly provider: RemoteProviderReference,
+		public readonly provider: ProviderReference,
 		public readonly id: string,
+		public readonly nodeId: string | undefined,
 		public readonly title: string,
 		public readonly url: string,
-		public readonly date: Date,
+		public readonly createdDate: Date,
+		public readonly updatedDate: Date,
 		public readonly closed: boolean,
 		public readonly state: IssueOrPullRequestState,
-		public readonly updatedDate: Date,
 		public readonly author: IssueMember,
 		public readonly repository: IssueRepository,
 		public readonly assignees: IssueMember[],

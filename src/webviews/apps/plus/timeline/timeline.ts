@@ -3,15 +3,14 @@ import './timeline.scss';
 import { provideVSCodeDesignSystem, vsCodeDropdown, vsCodeOption } from '@vscode/webview-ui-toolkit';
 import type { Period, State } from '../../../../plus/webviews/timeline/protocol';
 import {
-	DidChangeNotificationType,
-	OpenDataPointCommandType,
-	UpdatePeriodCommandType,
+	DidChangeNotification,
+	OpenDataPointCommand,
+	UpdatePeriodCommand,
 } from '../../../../plus/webviews/timeline/protocol';
 import type { IpcMessage } from '../../../protocol';
-import { onIpc } from '../../../protocol';
 import { App } from '../../shared/appBase';
-import type { FeatureGate } from '../../shared/components/feature-gate';
-import type { FeatureGateBadge } from '../../shared/components/feature-gate-badge';
+import type { GlFeatureBadge } from '../../shared/components/feature-badge';
+import type { GlFeatureGate } from '../../shared/components/feature-gate';
 import { DOM } from '../../shared/dom';
 import type { DataPointClickEvent } from './chart';
 import { TimelineChart } from './chart';
@@ -19,7 +18,7 @@ import '../../shared/components/code-icon';
 import '../../shared/components/progress';
 import '../../shared/components/button';
 import '../../shared/components/feature-gate';
-import '../../shared/components/feature-gate-badge';
+import '../../shared/components/feature-badge';
 
 export class TimelineApp extends App<State> {
 	private _chart: TimelineChart | undefined;
@@ -48,27 +47,21 @@ export class TimelineApp extends App<State> {
 		return disposables;
 	}
 
-	protected override onMessageReceived(e: MessageEvent) {
-		const msg = e.data as IpcMessage;
-
-		switch (msg.method) {
-			case DidChangeNotificationType.method:
-				this.log(`onMessageReceived(${msg.id}): name=${msg.method}`);
-
-				onIpc(DidChangeNotificationType, msg, params => {
-					this.state = params.state;
-					this.setState(this.state);
-					this.updateState();
-				});
+	protected override onMessageReceived(msg: IpcMessage) {
+		switch (true) {
+			case DidChangeNotification.is(msg):
+				this.state = msg.params.state;
+				this.setState(this.state);
+				this.updateState();
 				break;
 
 			default:
-				super.onMessageReceived?.(e);
+				super.onMessageReceived?.(msg);
 		}
 	}
 
 	private onChartDataPointClicked(e: DataPointClickEvent) {
-		this.sendCommand(OpenDataPointCommandType, e);
+		this.sendCommand(OpenDataPointCommand, e);
 	}
 
 	private onKeyDown(e: KeyboardEvent) {
@@ -84,19 +77,22 @@ export class TimelineApp extends App<State> {
 		this.log(`onPeriodChanged(): name=${element.name}, value=${value}`);
 
 		this.updateLoading(true);
-		this.sendCommand(UpdatePeriodCommandType, { period: value });
+		this.sendCommand(UpdatePeriodCommand, { period: value });
 	}
 
 	private updateState() {
-		const $gate = document.getElementById('subscription-gate')! as FeatureGate;
+		const $gate = document.getElementById('subscription-gate')! as GlFeatureGate;
 		if ($gate != null) {
+			$gate.source = { source: 'timeline', detail: 'gate' };
 			$gate.state = this.state.access.subscription.current.state;
-			$gate.visible = this.state.access.allowed !== true && this.state.uri != null;
+			$gate.visible = this.state.access.allowed !== true; // && this.state.uri != null;
 		}
 
-		const $badge = document.getElementById('subscription-gate-badge')! as FeatureGateBadge;
-		$badge.subscription = this.state.access.subscription.current;
-		$badge.placement = this.placement === 'view' ? 'top start' : 'top end';
+		const els = document.querySelectorAll<GlFeatureBadge>('gl-feature-badge');
+		for (const el of els) {
+			el.source = { source: 'timeline', detail: 'badge' };
+			el.subscription = this.state.access.subscription.current;
+		}
 
 		if (this._chart == null) {
 			this._chart = new TimelineChart('#chart', this.placement);

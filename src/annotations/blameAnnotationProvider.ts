@@ -8,26 +8,26 @@ import type { GitCommit } from '../git/models/commit';
 import { changesMessage, detailsMessage } from '../hovers/hovers';
 import { configuration } from '../system/configuration';
 import { log } from '../system/decorators/log';
-import type { GitDocumentState, TrackedDocument } from '../trackers/gitDocumentTracker';
+import type { TrackedGitDocument } from '../trackers/trackedDocument';
 import { AnnotationProviderBase } from './annotationProvider';
 import type { ComputedHeatmap } from './annotations';
 import { getHeatmapColors } from './annotations';
 
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
 export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase {
 	protected blame: Promise<GitBlame | undefined>;
 	protected hoverProviderDisposable: Disposable | undefined;
 
 	constructor(
+		container: Container,
 		annotationType: FileAnnotationType,
 		editor: TextEditor,
-		trackedDocument: TrackedDocument<GitDocumentState>,
-		protected readonly container: Container,
+		trackedDocument: TrackedGitDocument,
 	) {
-		super(annotationType, editor, trackedDocument);
+		super(container, annotationType, editor, trackedDocument);
 
-		this.blame = this.container.git.getBlame(this.trackedDocument.uri, editor.document);
+		this.blame = container.git.getBlame(this.trackedDocument.uri, editor.document);
 
 		if (editor.document.isDirty) {
 			trackedDocument.setForceDirtyStateChangeOnNextDocumentChange();
@@ -42,14 +42,17 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 		super.clear();
 	}
 
-	async validate(): Promise<boolean> {
+	override async validate(): Promise<boolean> {
 		const blame = await this.blame;
-		return blame != null && blame.lines.length !== 0;
+		return Boolean(blame?.lines.length);
 	}
 
-	protected async getBlame(): Promise<GitBlame | undefined> {
+	protected async getBlame(force?: boolean): Promise<GitBlame | undefined> {
+		if (force) {
+			this.blame = this.container.git.getBlame(this.trackedDocument.uri, this.editor.document);
+		}
 		const blame = await this.blame;
-		if (blame == null || blame.lines.length === 0) return undefined;
+		if (!blame?.lines.length) return undefined;
 
 		return blame;
 	}
@@ -106,10 +109,10 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 			Array.isArray(lookupTable)
 				? lookupTable
 				: unified
-				? lookupTable.hot.concat(lookupTable.cold)
-				: date.getTime() < coldThresholdTimestamp
-				? lookupTable.cold
-				: lookupTable.hot;
+				  ? lookupTable.hot.concat(lookupTable.cold)
+				  : date.getTime() < coldThresholdTimestamp
+				    ? lookupTable.cold
+				    : lookupTable.hot;
 
 		const computeRelativeAge = (date: Date, lookup: number[]) => {
 			const time = date.getTime();
@@ -141,8 +144,9 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 			return;
 		}
 
+		this.hoverProviderDisposable?.dispose();
 		this.hoverProviderDisposable = languages.registerHoverProvider(
-			{ pattern: this.document.uri.fsPath },
+			{ pattern: this.editor.document.uri.fsPath },
 			{
 				provideHover: (document: TextDocument, position: Position, token: CancellationToken) =>
 					this.provideHover(providers, document, position, token),
@@ -158,7 +162,7 @@ export abstract class BlameAnnotationProviderBase extends AnnotationProviderBase
 	): Promise<Hover | undefined> {
 		if (configuration.get('hovers.annotations.over') !== 'line' && position.character !== 0) return undefined;
 
-		if (this.document.uri.toString() !== document.uri.toString()) return undefined;
+		if (this.editor.document.uri.toString() !== document.uri.toString()) return undefined;
 
 		const blame = await this.getBlame();
 		if (blame == null) return undefined;

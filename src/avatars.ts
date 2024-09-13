@@ -11,7 +11,7 @@ import { filterMap } from './system/iterable';
 import { base64, equalsIgnoreCase } from './system/string';
 import type { ContactPresenceStatus } from './vsls/vsls';
 
-const maxSmallIntegerV8 = 2 ** 30; // Max number that can be stored in V8's smis (small integers)
+const maxSmallIntegerV8 = 2 ** 30 - 1; // Max number that can be stored in V8's smis (small integers)
 
 let avatarCache: Map<string, Avatar> | undefined;
 const avatarQueue = new Map<string, Promise<Uri>>();
@@ -125,7 +125,13 @@ function getAvatarUriCore(
 	const avatar = createOrUpdateAvatar(key, email, size, hash, options?.defaultStyle);
 	if (avatar.uri != null) return avatar.uri;
 
-	if (!options?.cached && repoPathOrCommit != null && getContext('gitlens:hasConnectedRemotes')) {
+	if (
+		!options?.cached &&
+		repoPathOrCommit != null &&
+		getContext('gitlens:repos:withHostingIntegrationsConnected')?.includes(
+			typeof repoPathOrCommit === 'string' ? repoPathOrCommit : repoPathOrCommit.repoPath,
+		)
+	) {
 		let query = avatarQueue.get(key);
 		if (query == null && hasAvatarExpired(avatar)) {
 			query = getAvatarUriFromRemoteProvider(avatar, key, email, repoPathOrCommit, { size: size }).then(
@@ -220,8 +226,14 @@ async function getAvatarUriFromRemoteProvider(
 		// 	account = await remote?.provider.getAccountForEmail(email, { avatarSize: size });
 		// } else {
 		if (typeof repoPathOrCommit !== 'string') {
-			const remote = await Container.instance.git.getBestRemoteWithRichProvider(repoPathOrCommit.repoPath);
-			account = await remote?.provider.getAccountForCommit(repoPathOrCommit.ref, { avatarSize: size });
+			const remote = await Container.instance.git.getBestRemoteWithIntegration(repoPathOrCommit.repoPath);
+			if (remote?.hasIntegration()) {
+				account = await (
+					await remote.getIntegration()
+				)?.getAccountForCommit(remote.provider.repoDesc, repoPathOrCommit.ref, {
+					avatarSize: size,
+				});
+			}
 		}
 
 		if (account?.avatarUrl == null) {

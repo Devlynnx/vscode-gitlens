@@ -1,25 +1,37 @@
-import type { Disposable, TreeCheckboxChangeEvent } from 'vscode';
-import { ThemeIcon, TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, window } from 'vscode';
+import type { TreeCheckboxChangeEvent } from 'vscode';
+import { Disposable, ThemeIcon, TreeItem, TreeItemCheckboxState, TreeItemCollapsibleState, window } from 'vscode';
 import { md5 } from '@env/crypto';
 import type { StoredNamedRef } from '../../constants';
+import type { FilesComparison } from '../../git/actions/commit';
 import { GitUri } from '../../git/gitUri';
 import { createRevisionRange, shortenRevision } from '../../git/models/reference';
+import type { GitUser } from '../../git/models/user';
+import type { CommitsQueryResults, FilesQueryResults } from '../../git/queryResults';
+import { getAheadBehindFilesQuery, getCommitsQuery, getFilesQuery } from '../../git/queryResults';
 import { gate } from '../../system/decorators/gate';
 import { debug, log } from '../../system/decorators/log';
-import { getSettledValue } from '../../system/promise';
+import { weakEvent } from '../../system/event';
 import { pluralize } from '../../system/string';
 import type { SearchAndCompareView } from '../searchAndCompareView';
 import type { View } from '../viewBase';
-import type { CommitsQueryResults } from './resultsCommitsNode';
+import { SubscribeableViewNode } from './abstract/subscribeableViewNode';
+import type { ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { ResultsCommitsNode } from './resultsCommitsNode';
-import type { FilesQueryResults } from './resultsFilesNode';
 import { ResultsFilesNode } from './resultsFilesNode';
-import type { ViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, SubscribeableViewNode } from './viewNode';
 
 let instanceId = 0;
 
-export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareView> {
+type State = {
+	filterCommits: GitUser[] | undefined;
+};
+
+export class CompareResultsNode extends SubscribeableViewNode<
+	'compare-results',
+	SearchAndCompareView,
+	ViewNode,
+	State
+> {
 	private _instanceId: number;
 
 	constructor(
@@ -30,14 +42,14 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 		private _compareWith: StoredNamedRef,
 		private _storedAt: number = 0,
 	) {
-		super(GitUri.fromRepoPath(repoPath), view, parent);
+		super('compare-results', GitUri.fromRepoPath(repoPath), view, parent);
 
 		this._instanceId = instanceId++;
 		this.updateContext({
 			comparisonId: `${_ref.ref}+${_compareWith.ref}+${this._instanceId}`,
 			storedComparisonId: this.getStorageId(),
 		});
-		this._uniqueId = getViewNodeId('comparison-results', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 
 		// If this is a new comparison, save it
 		if (this._storedAt === 0) {
@@ -80,8 +92,32 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 		return this._compareWith;
 	}
 
+	private _isFiltered: boolean | undefined;
+	private get filterByAuthors(): GitUser[] | undefined {
+		const authors = this.getState('filterCommits');
+
+		const isFiltered = Boolean(authors?.length);
+		if (this._isFiltered != null && this._isFiltered !== isFiltered) {
+			this.updateContext({ comparisonFiltered: isFiltered });
+		}
+		this._isFiltered = isFiltered;
+
+		return authors;
+	}
+
 	protected override subscribe(): Disposable | Promise<Disposable | undefined> | undefined {
-		return this.view.onDidChangeNodesCheckedState(this.onNodesCheckedStateChanged, this);
+		return Disposable.from(
+			weakEvent(this.view.onDidChangeNodesCheckedState, this.onNodesCheckedStateChanged, this),
+			weakEvent(
+				this.view.container.integrations.onDidChangeConnectionState,
+				this.onIntegrationConnectionStateChanged,
+				this,
+			),
+		);
+	}
+
+	private onIntegrationConnectionStateChanged() {
+		this.view.triggerNodeChange(this.parent);
 	}
 
 	private onNodesCheckedStateChanged(e: TreeCheckboxChangeEvent<ViewNode>) {
@@ -95,22 +131,23 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 		void this.remove(true);
 	}
 
-	private _children: ViewNode[] | undefined;
-
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children == null) {
+		if (this.children == null) {
 			const ahead = this.ahead;
 			const behind = this.behind;
 
-			const aheadBehindCounts = await this.view.container.git.getAheadBehindCommitCount(this.repoPath, [
-				createRevisionRange(behind.ref1 || 'HEAD', behind.ref2, '...'),
-			]);
+			const aheadBehindCounts = await this.view.container.git.getAheadBehindCommitCount(
+				this.repoPath,
+				[createRevisionRange(behind.ref1 || 'HEAD', behind.ref2, '...')],
+				{ authors: this.filterByAuthors },
+			);
+
 			const mergeBase =
 				(await this.view.container.git.getMergeBase(this.repoPath, behind.ref1, behind.ref2, {
 					forkPoint: true,
 				})) ?? (await this.view.container.git.getMergeBase(this.repoPath, behind.ref1, behind.ref2));
 
-			this._children = [
+			const children: ViewNode[] = [
 				new ResultsCommitsNode(
 					this.view,
 					this,
@@ -151,19 +188,27 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 						expand: false,
 					},
 				),
-				new ResultsFilesNode(
-					this.view,
-					this,
-					this.repoPath,
-					this._compareWith.ref,
-					this._ref.ref,
-					this.getFilesQuery.bind(this),
-					undefined,
-					{ expand: false },
-				),
 			];
+
+			// Can't support showing files when commits are filtered
+			if (!this.filterByAuthors?.length) {
+				children.push(
+					new ResultsFilesNode(
+						this.view,
+						this,
+						this.repoPath,
+						this._compareWith.ref,
+						this._ref.ref,
+						this.getFilesQuery.bind(this),
+						undefined,
+						{ expand: false },
+					),
+				);
+			}
+
+			this.children = children;
 		}
-		return this._children;
+		return this.children;
 	}
 
 	getTreeItem(): TreeItem {
@@ -183,7 +228,9 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 			TreeItemCollapsibleState.Collapsed,
 		);
 		item.id = this.id;
-		item.contextValue = `${ContextValues.CompareResults}${this._ref.ref === '' ? '+working' : ''}`;
+		item.contextValue = `${ContextValues.CompareResults}${this._ref.ref === '' ? '+working' : ''}${
+			this.filterByAuthors?.length ? '+filtered' : ''
+		}`;
 		item.description = description;
 		item.iconPath = new ThemeIcon('compare-changes');
 
@@ -196,12 +243,16 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 		return Promise.resolve<[string, string]>([this._compareWith.ref, this._ref.ref]);
 	}
 
-	@gate()
-	@debug()
-	override refresh(reset: boolean = false) {
-		if (!reset) return;
+	async getFilesComparison(): Promise<FilesComparison | undefined> {
+		const children = await this.getChildren();
+		const node = children.find(c => c.is('results-files'));
+		return node?.getFilesComparison();
+	}
 
-		this._children = undefined;
+	@log()
+	clearReviewed() {
+		resetComparisonCheckedFiles(this.view, this.getStorageId());
+		void this.store();
 	}
 
 	@log()
@@ -221,123 +272,35 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 		// Remove the existing stored item and save a new one
 		await this.replace(currentId, true);
 
-		this._children = undefined;
+		this.children = undefined;
 		this.view.triggerNodeChange(this.parent);
 		queueMicrotask(() => this.view.reveal(this, { expand: true, focus: true, select: true }));
 	}
 
 	private async getAheadFilesQuery(): Promise<FilesQueryResults> {
-		return this.getAheadBehindFilesQuery(
+		return getAheadBehindFilesQuery(
+			this.view.container,
+			this.repoPath,
 			createRevisionRange(this._compareWith?.ref || 'HEAD', this._ref.ref || 'HEAD', '...'),
 			this._ref.ref === '',
 		);
 	}
 
 	private async getBehindFilesQuery(): Promise<FilesQueryResults> {
-		return this.getAheadBehindFilesQuery(
+		return getAheadBehindFilesQuery(
+			this.view.container,
+			this.repoPath,
 			createRevisionRange(this._ref.ref || 'HEAD', this._compareWith.ref || 'HEAD', '...'),
 			false,
 		);
 	}
 
-	private async getAheadBehindFilesQuery(
-		comparison: string,
-		compareWithWorkingTree: boolean,
-	): Promise<FilesQueryResults> {
-		const [filesResult, workingFilesResult, statsResult, workingStatsResult] = await Promise.allSettled([
-			this.view.container.git.getDiffStatus(this.repoPath, comparison),
-			compareWithWorkingTree ? this.view.container.git.getDiffStatus(this.repoPath, 'HEAD') : undefined,
-			this.view.container.git.getChangedFilesCount(this.repoPath, comparison),
-			compareWithWorkingTree ? this.view.container.git.getChangedFilesCount(this.repoPath, 'HEAD') : undefined,
-		]);
-
-		let files = getSettledValue(filesResult) ?? [];
-		let stats: FilesQueryResults['stats'] = getSettledValue(statsResult);
-
-		if (compareWithWorkingTree) {
-			const workingFiles = getSettledValue(workingFilesResult);
-			if (workingFiles != null) {
-				if (files.length === 0) {
-					files = workingFiles ?? [];
-				} else {
-					for (const wf of workingFiles) {
-						const index = files.findIndex(f => f.path === wf.path);
-						if (index !== -1) {
-							files.splice(index, 1, wf);
-						} else {
-							files.push(wf);
-						}
-					}
-				}
-			}
-
-			const workingStats = getSettledValue(workingStatsResult);
-			if (workingStats != null) {
-				if (stats == null) {
-					stats = workingStats;
-				} else {
-					stats = {
-						additions: stats.additions + workingStats.additions,
-						deletions: stats.deletions + workingStats.deletions,
-						changedFiles: files.length,
-						approximated: true,
-					};
-				}
-			}
-		}
-
-		return {
-			label: `${pluralize('file', files.length, { zero: 'No' })} changed`,
-			files: files,
-			stats: stats,
-		};
-	}
-
 	private getCommitsQuery(range: string): (limit: number | undefined) => Promise<CommitsQueryResults> {
-		const repoPath = this.repoPath;
-		return async (limit: number | undefined) => {
-			const log = await this.view.container.git.getLog(repoPath, {
-				limit: limit,
-				ref: range,
-			});
-
-			const results: Mutable<Partial<CommitsQueryResults>> = {
-				log: log,
-				hasMore: log?.hasMore ?? true,
-			};
-			if (results.hasMore) {
-				results.more = async (limit: number | undefined) => {
-					results.log = (await results.log?.more?.(limit)) ?? results.log;
-					results.hasMore = results.log?.hasMore ?? true;
-				};
-			}
-
-			return results as CommitsQueryResults;
-		};
+		return getCommitsQuery(this.view.container, this.repoPath, range, this.filterByAuthors);
 	}
 
-	private async getFilesQuery(): Promise<FilesQueryResults> {
-		let comparison;
-		if (this._compareWith.ref === '') {
-			debugger;
-			throw new Error('Cannot get files for comparisons of a ref with working tree');
-		} else if (this._ref.ref === '') {
-			comparison = this._compareWith.ref;
-		} else {
-			comparison = `${this._compareWith.ref}..${this._ref.ref}`;
-		}
-
-		const [filesResult, statsResult] = await Promise.allSettled([
-			this.view.container.git.getDiffStatus(this.repoPath, comparison),
-			this.view.container.git.getChangedFilesCount(this.repoPath, comparison),
-		]);
-
-		const files = getSettledValue(filesResult) ?? [];
-		return {
-			label: `${pluralize('file', files.length, { zero: 'No' })} changed`,
-			files: files,
-			stats: getSettledValue(statsResult),
-		};
+	private getFilesQuery(): Promise<FilesQueryResults> {
+		return getFilesQuery(this.view.container, this.repoPath, this._ref.ref, this._compareWith.ref);
 	}
 
 	private getStorageId() {
@@ -345,10 +308,12 @@ export class CompareResultsNode extends SubscribeableViewNode<SearchAndCompareVi
 	}
 
 	private remove(silent: boolean = false) {
+		resetComparisonCheckedFiles(this.view, this.getStorageId());
 		return this.view.updateStorage(this.getStorageId(), undefined, silent);
 	}
 
 	private async replace(id: string, silent: boolean = false) {
+		resetComparisonCheckedFiles(this.view, id);
 		await this.view.updateStorage(id, undefined, silent);
 		return this.store(silent);
 	}

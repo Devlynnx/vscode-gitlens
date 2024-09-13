@@ -13,10 +13,10 @@ export function apply(repo?: string | Repository, ref?: GitStashReference) {
 	});
 }
 
-export function drop(repo?: string | Repository, ref?: GitStashReference) {
+export function drop(repo?: string | Repository, refs?: GitStashReference[]) {
 	return executeGitCommand({
 		command: 'stash',
-		state: { subcommand: 'drop', repo: repo, reference: ref },
+		state: { subcommand: 'drop', repo: repo, references: refs },
 	});
 }
 
@@ -38,6 +38,7 @@ export function push(
 	repo?: string | Repository,
 	uris?: Uri[],
 	message?: string,
+	includeUntracked: boolean = false,
 	keepStaged: boolean = false,
 	onlyStaged: boolean = false,
 	onlyStagedUris?: Uri[],
@@ -50,7 +51,11 @@ export function push(
 			uris: uris,
 			onlyStagedUris: onlyStagedUris,
 			message: message,
-			flags: [...(keepStaged ? ['--keep-index'] : []), ...(onlyStaged ? ['--staged'] : [])] as PushFlags[],
+			flags: [
+				...(includeUntracked ? ['--include-untracked'] : []),
+				...(keepStaged ? ['--keep-index'] : []),
+				...(onlyStaged ? ['--staged'] : []),
+			] as PushFlags[],
 		},
 	});
 }

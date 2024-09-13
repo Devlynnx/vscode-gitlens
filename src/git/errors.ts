@@ -6,12 +6,68 @@ export class GitSearchError extends Error {
 	}
 }
 
+export const enum ApplyPatchCommitErrorReason {
+	StashFailed,
+	CreateWorktreeFailed,
+	ApplyFailed,
+	ApplyAbortedWouldOverwrite,
+	AppliedWithConflicts,
+}
+
+export class ApplyPatchCommitError extends Error {
+	static is(ex: unknown, reason?: ApplyPatchCommitErrorReason): ex is ApplyPatchCommitError {
+		return ex instanceof ApplyPatchCommitError && (reason == null || ex.reason === reason);
+	}
+
+	readonly original?: Error;
+	readonly reason: ApplyPatchCommitErrorReason | undefined;
+
+	constructor(reason: ApplyPatchCommitErrorReason, message?: string, original?: Error) {
+		message ||= 'Unable to apply patch';
+		super(message);
+
+		this.original = original;
+		this.reason = reason;
+		Error.captureStackTrace?.(this, ApplyPatchCommitError);
+	}
+}
+
+export class BlameIgnoreRevsFileError extends Error {
+	static is(ex: unknown): ex is BlameIgnoreRevsFileError {
+		return ex instanceof BlameIgnoreRevsFileError;
+	}
+
+	constructor(
+		public readonly fileName: string,
+		public readonly original?: Error,
+	) {
+		super(`Invalid blame.ignoreRevsFile: '${fileName}'`);
+
+		Error.captureStackTrace?.(this, BlameIgnoreRevsFileError);
+	}
+}
+
+export class BlameIgnoreRevsFileBadRevisionError extends Error {
+	static is(ex: unknown): ex is BlameIgnoreRevsFileBadRevisionError {
+		return ex instanceof BlameIgnoreRevsFileBadRevisionError;
+	}
+
+	constructor(
+		public readonly revision: string,
+		public readonly original?: Error,
+	) {
+		super(`Invalid revision in blame.ignoreRevsFile: '${revision}'`);
+
+		Error.captureStackTrace?.(this, BlameIgnoreRevsFileBadRevisionError);
+	}
+}
+
 export const enum StashApplyErrorReason {
-	WorkingChanges = 1,
+	WorkingChanges,
 }
 
 export class StashApplyError extends Error {
-	static is(ex: any, reason?: StashApplyErrorReason): ex is StashApplyError {
+	static is(ex: unknown, reason?: StashApplyErrorReason): ex is StashApplyError {
 		return ex instanceof StashApplyError && (reason == null || ex.reason === reason);
 	}
 
@@ -42,11 +98,12 @@ export class StashApplyError extends Error {
 }
 
 export const enum StashPushErrorReason {
-	ConflictingStagedAndUnstagedLines = 1,
+	ConflictingStagedAndUnstagedLines,
+	NothingToSave,
 }
 
 export class StashPushError extends Error {
-	static is(ex: any, reason?: StashPushErrorReason): ex is StashPushError {
+	static is(ex: unknown, reason?: StashPushErrorReason): ex is StashPushError {
 		return ex instanceof StashPushError && (reason == null || ex.reason === reason);
 	}
 
@@ -68,7 +125,10 @@ export class StashPushError extends Error {
 			switch (reason) {
 				case StashPushErrorReason.ConflictingStagedAndUnstagedLines:
 					message =
-						'Stash was created, but the working tree cannot be updated because at least one file has staged and unstaged changes on the same line(s).\n\nDo you want to try again by stashing both your staged and unstaged changes?';
+						'Changes were stashed, but the working tree cannot be updated because at least one file has staged and unstaged changes on the same line(s)';
+					break;
+				case StashPushErrorReason.NothingToSave:
+					message = 'No files to stash';
 					break;
 				default:
 					message = 'Unable to stash';
@@ -83,17 +143,19 @@ export class StashPushError extends Error {
 }
 
 export const enum PushErrorReason {
-	RemoteAhead = 1,
-	TipBehind = 2,
-	PushRejected = 3,
-	PermissionDenied = 4,
-	RemoteConnection = 5,
-	NoUpstream = 6,
-	Other = 7,
+	RemoteAhead,
+	TipBehind,
+	PushRejected,
+	PushRejectedWithLease,
+	PushRejectedWithLeaseIfIncludes,
+	PermissionDenied,
+	RemoteConnection,
+	NoUpstream,
+	Other,
 }
 
 export class PushError extends Error {
-	static is(ex: any, reason?: PushErrorReason): ex is PushError {
+	static is(ex: unknown, reason?: PushErrorReason): ex is PushError {
 		return ex instanceof PushError && (reason == null || ex.reason === reason);
 	}
 
@@ -118,15 +180,22 @@ export class PushError extends Error {
 			reason = undefined;
 		} else {
 			reason = messageOrReason;
+
 			switch (reason) {
 				case PushErrorReason.RemoteAhead:
-					message = `${baseMessage} because the remote contains work that you do not have locally. Try doing a fetch first.`;
+					message = `${baseMessage} because the remote contains work that you do not have locally. Try fetching first.`;
 					break;
 				case PushErrorReason.TipBehind:
-					message = `${baseMessage} as it is behind its remote counterpart. Try doing a pull first.`;
+					message = `${baseMessage} as it is behind its remote counterpart. Try pulling first.`;
 					break;
 				case PushErrorReason.PushRejected:
-					message = `${baseMessage} because some refs failed to push or the push was rejected.`;
+					message = `${baseMessage} because some refs failed to push or the push was rejected. Try pulling first.`;
+					break;
+				case PushErrorReason.PushRejectedWithLease:
+				case PushErrorReason.PushRejectedWithLeaseIfIncludes:
+					message = `Unable to force push${branch ? ` branch '${branch}'` : ''}${
+						remote ? ` to ${remote}` : ''
+					} because some refs failed to push or the push was rejected. The tip of the remote-tracking branch has been updated since the last checkout. Try pulling first.`;
 					break;
 				case PushErrorReason.PermissionDenied:
 					message = `${baseMessage} because you don't have permission to push to this remote repository.`;
@@ -150,21 +219,21 @@ export class PushError extends Error {
 }
 
 export const enum PullErrorReason {
-	Conflict = 1,
-	GitIdentity = 2,
-	RemoteConnection = 3,
-	UnstagedChanges = 4,
-	UnmergedFiles = 5,
-	UncommittedChanges = 6,
-	OverwrittenChanges = 7,
-	RefLocked = 8,
-	RebaseMultipleBranches = 9,
-	TagConflict = 10,
-	Other = 11,
+	Conflict,
+	GitIdentity,
+	RemoteConnection,
+	UnstagedChanges,
+	UnmergedFiles,
+	UncommittedChanges,
+	OverwrittenChanges,
+	RefLocked,
+	RebaseMultipleBranches,
+	TagConflict,
+	Other,
 }
 
 export class PullError extends Error {
-	static is(ex: any, reason?: PullErrorReason): ex is PullError {
+	static is(ex: unknown, reason?: PullErrorReason): ex is PullError {
 		return ex instanceof PullError && (reason == null || ex.reason === reason);
 	}
 
@@ -233,14 +302,14 @@ export class PullError extends Error {
 }
 
 export const enum FetchErrorReason {
-	NoFastForward = 1,
-	NoRemote = 2,
-	RemoteConnection = 3,
-	Other = 4,
+	NoFastForward,
+	NoRemote,
+	RemoteConnection,
+	Other,
 }
 
 export class FetchError extends Error {
-	static is(ex: any, reason?: FetchErrorReason): ex is FetchError {
+	static is(ex: unknown, reason?: FetchErrorReason): ex is FetchError {
 		return ex instanceof FetchError && (reason == null || ex.reason === reason);
 	}
 
@@ -287,6 +356,52 @@ export class FetchError extends Error {
 	}
 }
 
+export const enum CherryPickErrorReason {
+	Conflicts,
+	AbortedWouldOverwrite,
+	Other,
+}
+
+export class CherryPickError extends Error {
+	static is(ex: unknown, reason?: CherryPickErrorReason): ex is CherryPickError {
+		return ex instanceof CherryPickError && (reason == null || ex.reason === reason);
+	}
+
+	readonly original?: Error;
+	readonly reason: CherryPickErrorReason | undefined;
+
+	constructor(reason?: CherryPickErrorReason, original?: Error, sha?: string);
+	constructor(message?: string, original?: Error);
+	constructor(messageOrReason: string | CherryPickErrorReason | undefined, original?: Error, sha?: string) {
+		let message;
+		const baseMessage = `Unable to cherry-pick${sha ? ` commit '${sha}'` : ''}`;
+		let reason: CherryPickErrorReason | undefined;
+		if (messageOrReason == null) {
+			message = baseMessage;
+		} else if (typeof messageOrReason === 'string') {
+			message = messageOrReason;
+			reason = undefined;
+		} else {
+			reason = messageOrReason;
+			switch (reason) {
+				case CherryPickErrorReason.AbortedWouldOverwrite:
+					message = `${baseMessage} as some local changes would be overwritten.`;
+					break;
+				case CherryPickErrorReason.Conflicts:
+					message = `${baseMessage} due to conflicts.`;
+					break;
+				default:
+					message = baseMessage;
+			}
+		}
+		super(message);
+
+		this.original = original;
+		this.reason = reason;
+		Error.captureStackTrace?.(this, CherryPickError);
+	}
+}
+
 export class WorkspaceUntrustedError extends Error {
 	constructor() {
 		super('Unable to perform Git operations because the current workspace is untrusted');
@@ -296,12 +411,12 @@ export class WorkspaceUntrustedError extends Error {
 }
 
 export const enum WorktreeCreateErrorReason {
-	AlreadyCheckedOut = 1,
-	AlreadyExists = 2,
+	AlreadyCheckedOut,
+	AlreadyExists,
 }
 
 export class WorktreeCreateError extends Error {
-	static is(ex: any, reason?: WorktreeCreateErrorReason): ex is WorktreeCreateError {
+	static is(ex: unknown, reason?: WorktreeCreateErrorReason): ex is WorktreeCreateError {
 		return ex instanceof WorktreeCreateError && (reason == null || ex.reason === reason);
 	}
 
@@ -338,12 +453,12 @@ export class WorktreeCreateError extends Error {
 }
 
 export const enum WorktreeDeleteErrorReason {
-	HasChanges = 1,
-	MainWorkingTree = 2,
+	HasChanges,
+	MainWorkingTree,
 }
 
 export class WorktreeDeleteError extends Error {
-	static is(ex: any, reason?: WorktreeDeleteErrorReason): ex is WorktreeDeleteError {
+	static is(ex: unknown, reason?: WorktreeDeleteErrorReason): ex is WorktreeDeleteError {
 		return ex instanceof WorktreeDeleteError && (reason == null || ex.reason === reason);
 	}
 

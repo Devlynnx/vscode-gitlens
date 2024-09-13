@@ -1,5 +1,6 @@
 import type { Disposable, Event } from 'vscode';
 import { EventEmitter } from 'vscode';
+import type { CustomEditorTypes, TreeViewTypes, WebviewTypes, WebviewViewTypes } from '../constants';
 import type { Container } from '../container';
 import { updateRecordValue } from '../system/object';
 import type { Storage } from '../system/storage';
@@ -11,29 +12,9 @@ export interface TrackedUsage {
 }
 
 export type TrackedUsageFeatures =
-	| 'branchesView'
-	| 'commitDetailsView'
-	| 'commitsView'
-	| 'contributorsView'
-	| 'fileHistoryView'
-	| 'graphDetailsView'
-	| 'graphView'
-	| 'graphWebview'
-	| 'homeView'
-	| 'lineHistoryView'
-	| 'rebaseEditor'
-	| 'remotesView'
-	| 'repositoriesView'
-	| 'stashesView'
-	| 'settingsWebview'
-	| 'searchAndCompareView'
-	| 'tagsView'
-	| 'timelineWebview'
-	| 'timelineView'
-	| 'welcomeWebview'
-	| 'workspaceView'
-	| 'focusWebview'
-	| 'accountView';
+	| `${WebviewTypes}Webview`
+	| `${TreeViewTypes | WebviewViewTypes}View`
+	| `${CustomEditorTypes}Editor`;
 export type TrackedUsageKeys = `${TrackedUsageFeatures}:shown`;
 
 export type UsageChangeEvent = {

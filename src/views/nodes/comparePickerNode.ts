@@ -3,7 +3,7 @@ import type { StoredNamedRef } from '../../constants';
 import { GlyphChars } from '../../constants';
 import { unknownGitUri } from '../../git/gitUri';
 import type { SearchAndCompareView, SearchAndCompareViewNode } from '../searchAndCompareView';
-import { ContextValues, ViewNode } from './viewNode';
+import { ContextValues, ViewNode } from './abstract/viewNode';
 
 interface RepoRef {
 	label: string;
@@ -11,7 +11,7 @@ interface RepoRef {
 	ref: string | StoredNamedRef;
 }
 
-export class ComparePickerNode extends ViewNode<SearchAndCompareView> {
+export class ComparePickerNode extends ViewNode<'compare-picker', SearchAndCompareView> {
 	readonly order: number = Date.now();
 
 	constructor(
@@ -19,7 +19,7 @@ export class ComparePickerNode extends ViewNode<SearchAndCompareView> {
 		parent: SearchAndCompareViewNode,
 		public readonly selectedRef: RepoRef,
 	) {
-		super(unknownGitUri, view, parent);
+		super('compare-picker', unknownGitUri, view, parent);
 	}
 
 	getChildren(): ViewNode[] {

@@ -1,38 +1,29 @@
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GitUri } from '../../git/gitUri';
-import type { GitTrackingState } from '../../git/models/branch';
 import type { GitCommit } from '../../git/models/commit';
 import type { GitFileWithCommit } from '../../git/models/file';
 import type { GitLog } from '../../git/models/log';
 import type { GitStatus, GitStatusFile } from '../../git/models/status';
-import { groupBy, makeHierarchical } from '../../system/array';
-import { filter, flatMap, map } from '../../system/iterable';
+import { makeHierarchical } from '../../system/array';
+import { filter, flatMap, groupBy, map } from '../../system/iterable';
 import { joinPaths, normalizePath } from '../../system/path';
 import { pluralize, sortCompare } from '../../system/string';
 import type { ViewsWithWorkingTree } from '../viewBase';
-import { WorktreesView } from '../worktreesView';
+import { ContextValues, getViewNodeId, ViewNode } from './abstract/viewNode';
 import type { FileNode } from './folderNode';
 import { FolderNode } from './folderNode';
 import { StatusFileNode } from './statusFileNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
+export class StatusFilesNode extends ViewNode<'status-files', ViewsWithWorkingTree> {
 	constructor(
 		view: ViewsWithWorkingTree,
 		protected override readonly parent: ViewNode,
-		public readonly status:
-			| GitStatus
-			| {
-					readonly repoPath: string;
-					readonly files: GitStatusFile[];
-					readonly state: GitTrackingState;
-					readonly upstream?: string;
-			  },
+		public readonly status: GitStatus,
 		public readonly range: string | undefined,
 	) {
-		super(GitUri.fromRepoPath(status.repoPath), view, parent);
+		super('status-files', GitUri.fromRepoPath(status.repoPath), view, parent);
 
-		this._uniqueId = getViewNodeId('status-files', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
@@ -68,10 +59,7 @@ export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
 			}
 		}
 
-		if (
-			(this.view instanceof WorktreesView || this.view.config.includeWorkingTree) &&
-			this.status.files.length !== 0
-		) {
+		if ((this.view.type === 'worktrees' || this.view.config.includeWorkingTree) && this.status.files.length !== 0) {
 			files.unshift(
 				...flatMap(this.status.files, f =>
 					map(f.getPseudoCommits(this.view.container, undefined), c => this.getFileWithPseudoCommit(f, c)),
@@ -91,6 +79,7 @@ export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
 					files[files.length - 1],
 					repoPath,
 					files.map(s => s.commit),
+					'working',
 				),
 		);
 
@@ -113,14 +102,14 @@ export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
 
 	async getTreeItem(): Promise<TreeItem> {
 		let files =
-			this.view instanceof WorktreesView || this.view.config.includeWorkingTree ? this.status.files.length : 0;
+			this.view.type === 'worktrees' || this.view.config.includeWorkingTree ? this.status.files.length : 0;
 
 		if (this.range != null) {
 			if (this.status.upstream != null && this.status.state.ahead > 0) {
 				if (files > 0) {
 					const aheadFiles = await this.view.container.git.getDiffStatus(
 						this.repoPath,
-						`${this.status.upstream}...`,
+						`${this.status.upstream?.name}...`,
 					);
 
 					if (aheadFiles != null) {
@@ -137,7 +126,7 @@ export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
 				} else {
 					const stats = await this.view.container.git.getChangedFilesCount(
 						this.repoPath,
-						`${this.status.upstream}...`,
+						`${this.status.upstream?.name}...`,
 					);
 					if (stats != null) {
 						files += stats.changedFiles;
@@ -150,6 +139,7 @@ export class StatusFilesNode extends ViewNode<ViewsWithWorkingTree> {
 
 		const label = files === -1 ? '?? files changed' : `${pluralize('file', files)} changed`;
 		const item = new TreeItem(label, TreeItemCollapsibleState.Collapsed);
+		item.description = 'working tree';
 		item.id = this.id;
 		item.contextValue = ContextValues.StatusFiles;
 		item.iconPath = {

@@ -11,13 +11,14 @@ import { debug } from '../../system/decorators/log';
 import { map } from '../../system/iterable';
 import { pad } from '../../system/string';
 import type { ViewsWithTags } from '../viewBase';
+import type { PageableViewNode, ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
+import { ViewRefNode } from './abstract/viewRefNode';
 import { CommitNode } from './commitNode';
 import { LoadMoreNode, MessageNode } from './common';
 import { insertDateMarkers } from './helpers';
-import type { PageableViewNode, ViewNode } from './viewNode';
-import { ContextValues, getViewNodeId, ViewRefNode } from './viewNode';
 
-export class TagNode extends ViewRefNode<ViewsWithTags, GitTagReference> implements PageableViewNode {
+export class TagNode extends ViewRefNode<'tag', ViewsWithTags, GitTagReference> implements PageableViewNode {
 	limit: number | undefined;
 
 	constructor(
@@ -26,10 +27,10 @@ export class TagNode extends ViewRefNode<ViewsWithTags, GitTagReference> impleme
 		public override parent: ViewNode,
 		public readonly tag: GitTag,
 	) {
-		super(uri, view, parent);
+		super('tag', uri, view, parent);
 
 		this.updateContext({ tag: tag });
-		this._uniqueId = getViewNodeId('tag', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 		this.limit = this.view.getNodeLastKnownLimit(this);
 	}
 
@@ -133,7 +134,7 @@ export class TagNode extends ViewRefNode<ViewsWithTags, GitTagReference> impleme
 			},
 			() => this.getLog(),
 		);
-		if (log == null || !log.hasMore) return;
+		if (!log?.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
 		if (this._log === log) return;

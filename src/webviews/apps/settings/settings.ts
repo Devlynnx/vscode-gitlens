@@ -1,20 +1,22 @@
 /*global document IntersectionObserver*/
 import './settings.scss';
+import type { ManageCloudIntegrationsCommandArgs } from '../../../commands/cloudIntegrations';
 import type { AutolinkReference } from '../../../config';
+import type { IssueIntegrationId } from '../../../plus/integrations/providers/models';
 import type { IpcMessage, UpdateConfigurationParams } from '../../protocol';
-import {
-	DidChangeConfigurationNotificationType,
-	DidGenerateConfigurationPreviewNotificationType,
-	DidOpenAnchorNotificationType,
-	GenerateConfigurationPreviewCommandType,
-	onIpc,
-	UpdateConfigurationCommandType,
-} from '../../protocol';
+import { DidChangeConfigurationNotification, UpdateConfigurationCommand } from '../../protocol';
 import type { State } from '../../settings/protocol';
+import {
+	DidChangeAccountNotification,
+	DidChangeConnectedJiraNotification,
+	DidOpenAnchorNotification,
+	GenerateConfigurationPreviewRequest,
+} from '../../settings/protocol';
 import { App } from '../shared/appBase';
 import { formatDate, setDefaultDateLocales } from '../shared/date';
 import { DOM } from '../shared/dom';
 // import { Snow } from '../shared/snow';
+import '../shared/components/feature-badge';
 import '../welcome/components/gitlens-logo';
 
 const topOffset = 83;
@@ -117,6 +119,7 @@ export class SettingsApp extends App<State> {
 				this.onSettingExpanderCicked(target, e),
 			),
 			DOM.on('a[data-action="jump"]', 'mousedown', e => {
+				e.target?.focus();
 				e.stopPropagation();
 				e.preventDefault();
 			}),
@@ -124,6 +127,7 @@ export class SettingsApp extends App<State> {
 				this.onJumpToLinkClicked(target, e),
 			),
 			DOM.on('[data-action]', 'mousedown', e => {
+				e.target?.focus();
 				e.stopPropagation();
 				e.preventDefault();
 			}),
@@ -133,36 +137,40 @@ export class SettingsApp extends App<State> {
 		return disposables;
 	}
 
-	protected override onMessageReceived(e: MessageEvent) {
-		const msg = e.data as IpcMessage;
-
-		this.log(`onMessageReceived(${msg.id}): name=${msg.method}`);
-
-		switch (msg.method) {
-			case DidOpenAnchorNotificationType.method: {
-				onIpc(DidOpenAnchorNotificationType, msg, params => {
-					this.scrollToAnchor(params.anchor, params.scrollBehavior);
-				});
+	protected override onMessageReceived(msg: IpcMessage) {
+		switch (true) {
+			case DidOpenAnchorNotification.is(msg):
+				this.scrollToAnchor(msg.params.anchor, msg.params.scrollBehavior);
 				break;
-			}
-			case DidChangeConfigurationNotificationType.method:
-				onIpc(DidChangeConfigurationNotificationType, msg, params => {
-					this.state.config = params.config;
-					this.state.customSettings = params.customSettings;
-					this.state.timestamp = Date.now();
-					this.setState(this.state);
 
-					this.updateState();
-				});
+			case DidChangeConfigurationNotification.is(msg):
+				this.state.config = msg.params.config;
+				this.state.customSettings = msg.params.customSettings;
+				this.state.timestamp = Date.now();
+				this.setState(this.state);
+
+				this.updateState();
+				break;
+
+			case DidChangeAccountNotification.is(msg):
+				this.state.hasAccount = msg.params.hasAccount;
+				this.setState(this.state);
+				this.renderAutolinkIntegration();
+				break;
+
+			case DidChangeConnectedJiraNotification.is(msg):
+				this.state.hasConnectedJira = msg.params.hasConnectedJira;
+				this.setState(this.state);
+				this.renderAutolinkIntegration();
 				break;
 
 			default:
-				super.onMessageReceived?.(e);
+				super.onMessageReceived?.(msg);
 		}
 	}
 
 	private applyChanges() {
-		this.sendCommand(UpdateConfigurationCommandType, {
+		this.sendCommand(UpdateConfigurationCommand, {
 			changes: { ...this._changes },
 			removes: Object.keys(this._changes).filter(
 				(k): k is UpdateConfigurationParams['removes'][0] => this._changes[k] === undefined,
@@ -438,7 +446,10 @@ export class SettingsApp extends App<State> {
 
 				const newTop =
 					el.getBoundingClientRect().top - document.body.getBoundingClientRect().top - (offset ?? 0);
-				if (Math.abs(top - newTop) < 2) return;
+				if (Math.abs(top - newTop) < 2) {
+					el.focus({ preventScroll: true });
+					return;
+				}
 
 				this.scrollTo(el, behavior, offset);
 			}, 50);
@@ -455,18 +466,24 @@ export class SettingsApp extends App<State> {
 			switch (op) {
 				case '=': {
 					// Equals
-					let value = changes[lhs];
+					let value: string | boolean | null | undefined = changes[lhs];
 					if (value === undefined) {
-						value = this.getSettingValue<string | boolean>(lhs) ?? false;
+						value = this.getSettingValue<string | boolean>(lhs);
+						if (value === undefined || (value === null && typeof rhs !== 'string')) {
+							value = false;
+						}
 					}
 					state = rhs !== undefined ? rhs === String(value) : Boolean(value);
 					break;
 				}
 				case '!': {
 					// Not equals
-					let value = changes[lhs];
+					let value: string | boolean | null | undefined = changes[lhs];
 					if (value === undefined) {
-						value = this.getSettingValue<string | boolean>(lhs) ?? false;
+						value = this.getSettingValue<string | boolean>(lhs);
+						if (value === undefined || (value === null && typeof rhs !== 'string')) {
+							value = false;
+						}
 					}
 					state = rhs !== undefined ? rhs !== String(value) : !value;
 					break;
@@ -502,6 +519,7 @@ export class SettingsApp extends App<State> {
 		document.getElementById('version')!.textContent = version;
 
 		const focusId = document.activeElement?.id;
+		this.renderAutolinkIntegration();
 		this.renderAutolinks();
 		if (focusId?.startsWith('autolinks.')) {
 			console.log(focusId, document.getElementById(focusId));
@@ -523,6 +541,7 @@ export class SettingsApp extends App<State> {
 				} else if (el.dataset.valueOff != null) {
 					const value = this.getSettingValue<string>(el.name);
 					el.checked = el.dataset.valueOff !== value;
+					el.indeterminate = value === null;
 				} else {
 					el.checked = this.getSettingValue<boolean>(el.name) ?? false;
 				}
@@ -603,12 +622,12 @@ export class SettingsApp extends App<State> {
 				}
 
 				if (!value) {
-					value = el.dataset.settingPreviewDefault;
+					const lookup = el.dataset.settingPreviewDefaultLookup;
+					if (lookup != null) {
+						value = this.getSettingValue<string>(lookup);
+					}
 					if (value == null) {
-						const lookup = el.dataset.settingPreviewDefaultLookup;
-						if (lookup != null) {
-							value = this.getSettingValue<string>(lookup);
-						}
+						value = el.dataset.settingPreviewDefault;
 					}
 				}
 
@@ -654,15 +673,11 @@ export class SettingsApp extends App<State> {
 					return;
 				}
 
-				void this.sendCommandWithCompletion(
-					GenerateConfigurationPreviewCommandType,
-					{
-						key: el.dataset.settingPreview!,
-						type: previewType,
-						format: value,
-					},
-					DidGenerateConfigurationPreviewNotificationType,
-				).then(params => {
+				void this.sendRequest(GenerateConfigurationPreviewRequest, {
+					key: el.dataset.settingPreview!,
+					type: previewType,
+					format: value,
+				}).then(params => {
 					el.innerText = params.preview ?? '';
 				});
 
@@ -782,6 +797,31 @@ export class SettingsApp extends App<State> {
 		if (el != null) {
 			el.classList.toggle('active', active);
 		}
+	}
+
+	private renderAutolinkIntegration() {
+		const $root = document.querySelector('[data-component="autolink-integration"]');
+		if ($root == null) return;
+
+		const { hasAccount, hasConnectedJira } = this.state;
+		let message = `<a href="command:gitlens.plus.cloudIntegrations.manage?${encodeURIComponent(
+			JSON.stringify({
+				integrationId: 'jira' as IssueIntegrationId.Jira,
+				source: 'settings',
+				detail: {
+					action: 'connect',
+					integration: 'jira',
+				},
+			} satisfies ManageCloudIntegrationsCommandArgs),
+		)}">Connect to Jira Cloud</a> &mdash; ${
+			hasAccount ? '' : 'sign up and '
+		}get access to automatic rich Jira autolinks.`;
+		if (hasAccount && hasConnectedJira) {
+			message =
+				'<i class="codicon codicon-check" style="vertical-align: text-bottom"></i> Jira connected &mdash; automatic rich Jira autolinks are enabled.';
+		}
+
+		$root.innerHTML = message;
 	}
 
 	private renderAutolinks() {

@@ -2,25 +2,26 @@ import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GitUri } from '../../git/gitUri';
 import type { Repository } from '../../git/models/repository';
 import { makeHierarchical } from '../../system/array';
-import { gate } from '../../system/decorators/gate';
 import { debug } from '../../system/decorators/log';
 import type { ViewsWithTagsNode } from '../viewBase';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
+import type { ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
 import { MessageNode } from './common';
 import { TagNode } from './tagNode';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class TagsNode extends ViewNode<ViewsWithTagsNode> {
+export class TagsNode extends CacheableChildrenViewNode<'tags', ViewsWithTagsNode> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithTagsNode,
 		protected override readonly parent: ViewNode,
 		public readonly repo: Repository,
 	) {
-		super(uri, view, parent);
+		super('tags', uri, view, parent);
 
 		this.updateContext({ repository: repo });
-		this._uniqueId = getViewNodeId('tags', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
@@ -31,10 +32,8 @@ export class TagsNode extends ViewNode<ViewsWithTagsNode> {
 		return this.repo.path;
 	}
 
-	private _children: ViewNode[] | undefined;
-
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children == null) {
+		if (this.children == null) {
 			const tags = await this.repo.getTags({ sort: true });
 			if (tags.values.length === 0) return [new MessageNode(this.view, this, 'No tags could be found.')];
 
@@ -52,10 +51,10 @@ export class TagsNode extends ViewNode<ViewsWithTagsNode> {
 			);
 
 			const root = new BranchOrTagFolderNode(this.view, this, 'tag', hierarchy, this.repo.path, '', undefined);
-			this._children = root.getChildren();
+			this.children = root.getChildren();
 		}
 
-		return this._children;
+		return this.children;
 	}
 
 	getTreeItem(): TreeItem {
@@ -66,9 +65,8 @@ export class TagsNode extends ViewNode<ViewsWithTagsNode> {
 		return item;
 	}
 
-	@gate()
 	@debug()
 	override refresh() {
-		this._children = undefined;
+		super.refresh(true);
 	}
 }

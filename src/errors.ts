@@ -1,8 +1,9 @@
 import type { Uri } from 'vscode';
+// eslint-disable-next-line no-restricted-imports
 import { CancellationError as _CancellationError } from 'vscode';
 import type { Response } from '@env/fetch';
-import type { RequiredSubscriptionPlans, Subscription } from './subscription';
-import { isSubscriptionPaidPlan } from './subscription';
+import type { RequiredSubscriptionPlans, Subscription } from './plus/gk/account/subscription';
+import { isSubscriptionPaidPlan } from './plus/gk/account/subscription';
 
 export class AccessDeniedError extends Error {
 	public readonly subscription: Subscription;
@@ -86,8 +87,16 @@ export class AuthenticationError extends Error {
 	}
 }
 
-export class CancellationError extends _CancellationError {
+export class AuthenticationRequiredError extends Error {
 	constructor() {
+		super('Authentication required');
+
+		Error.captureStackTrace?.(this, AuthenticationRequiredError);
+	}
+}
+
+export class CancellationError extends _CancellationError {
+	constructor(public readonly original?: Error) {
 		super();
 
 		Error.captureStackTrace?.(this, CancellationError);
@@ -192,8 +201,8 @@ export class ProviderNotFoundError extends Error {
 				pathOrUri == null
 					? String(pathOrUri)
 					: typeof pathOrUri === 'string'
-					? pathOrUri
-					: pathOrUri.toString(true)
+					  ? pathOrUri
+					  : pathOrUri.toString(true)
 			}'`,
 		);
 

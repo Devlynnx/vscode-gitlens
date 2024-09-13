@@ -2,26 +2,26 @@ import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GitUri } from '../../git/gitUri';
 import type { Repository } from '../../git/models/repository';
 import { makeHierarchical } from '../../system/array';
-import { gate } from '../../system/decorators/gate';
 import { debug } from '../../system/decorators/log';
-import { RepositoriesView } from '../repositoriesView';
 import type { ViewsWithBranchesNode } from '../viewBase';
+import { CacheableChildrenViewNode } from './abstract/cacheableChildrenViewNode';
+import type { ViewNode } from './abstract/viewNode';
+import { ContextValues, getViewNodeId } from './abstract/viewNode';
 import { BranchNode } from './branchNode';
 import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
 import { MessageNode } from './common';
-import { ContextValues, getViewNodeId, ViewNode } from './viewNode';
 
-export class BranchesNode extends ViewNode<ViewsWithBranchesNode> {
+export class BranchesNode extends CacheableChildrenViewNode<'branches', ViewsWithBranchesNode> {
 	constructor(
 		uri: GitUri,
 		view: ViewsWithBranchesNode,
 		protected override readonly parent: ViewNode,
 		public readonly repo: Repository,
 	) {
-		super(uri, view, parent);
+		super('branches', uri, view, parent);
 
 		this.updateContext({ repository: repo });
-		this._uniqueId = getViewNodeId('branches', this.context);
+		this._uniqueId = getViewNodeId(this.type, this.context);
 	}
 
 	override get id(): string {
@@ -32,16 +32,21 @@ export class BranchesNode extends ViewNode<ViewsWithBranchesNode> {
 		return this.repo.path;
 	}
 
-	private _children: ViewNode[] | undefined;
-
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children == null) {
+		if (this.children == null) {
 			const branches = await this.repo.getBranches({
 				// only show local branches
 				filter: b => !b.remote,
 				sort: { current: false },
 			});
 			if (branches.values.length === 0) return [new MessageNode(this.view, this, 'No branches could be found.')];
+
+			// if (configuration.get('views.collapseWorktreesWhenPossible')) {
+			// 	sortBranches(branches.values, {
+			// 		current: true,
+			// 		openWorktreeBranches: this.context.openWorktreeBranches,
+			// 	});
+			// }
 
 			// TODO@eamodio handle paging
 			const branchNodes = branches.values.map(
@@ -55,7 +60,7 @@ export class BranchesNode extends ViewNode<ViewsWithBranchesNode> {
 						false,
 						{
 							showComparison:
-								this.view instanceof RepositoriesView
+								this.view.type === 'repositories'
 									? this.view.config.branches.showBranchComparison
 									: this.view.config.showBranchComparison,
 						},
@@ -75,10 +80,10 @@ export class BranchesNode extends ViewNode<ViewsWithBranchesNode> {
 			);
 
 			const root = new BranchOrTagFolderNode(this.view, this, 'branch', hierarchy, this.repo.path, '', undefined);
-			this._children = root.getChildren();
+			this.children = root.getChildren();
 		}
 
-		return this._children;
+		return this.children;
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
@@ -97,9 +102,8 @@ export class BranchesNode extends ViewNode<ViewsWithBranchesNode> {
 		return item;
 	}
 
-	@gate()
 	@debug()
 	override refresh() {
-		this._children = undefined;
+		super.refresh(true);
 	}
 }
